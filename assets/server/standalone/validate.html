@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Evolution OS - Code Validator</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { 
+  background: #0a0a0f; 
+  color: #e0e0e0; 
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  padding: 20px;
+  min-height: 100vh;
+}
+h1 { 
+  color: #fff; 
+  margin-bottom: 20px; 
+  font-size: 24px;
+  font-weight: 500;
+}
+.container {
+  max-width: 900px;
+  margin: 0 auto;
+}
+textarea {
+  width: 100%;
+  height: 350px;
+  background: #12121a;
+  color: #a0ffa0;
+  border: 1px solid #333;
+  border-radius: 8px;
+  padding: 12px;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 13px;
+  resize: vertical;
+  outline: none;
+}
+textarea:focus { border-color: #06f; }
+.buttons {
+  margin: 15px 0;
+  display: flex;
+  gap: 10px;
+}
+button {
+  padding: 12px 28px;
+  background: #0066ff;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  font-size: 15px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+button:hover { background: #0052cc; }
+button.secondary {
+  background: #333;
+}
+button.secondary:hover { background: #444; }
+#result {
+  background: #12121a;
+  border: 1px solid #333;
+  border-radius: 8px;
+  padding: 15px;
+  min-height: 100px;
+  font-family: monospace;
+  font-size: 13px;
+  white-space: pre-wrap;
+}
+.status-valid {
+  color: #22c55e;
+  font-size: 16px;
+  margin-bottom: 10px;
+}
+.status-invalid {
+  color: #ef4444;
+  font-size: 16px;
+  margin-bottom: 10px;
+}
+.error-item {
+  color: #f87171;
+  padding: 4px 0;
+  border-left: 3px solid #ef4444;
+  padding-left: 10px;
+  margin: 5px 0;
+}
+.warning-item {
+  color: #fbbf24;
+  padding: 4px 0;
+  border-left: 3px solid #f59e0b;
+  padding-left: 10px;
+  margin: 5px 0;
+}
+.empty { color: #666; }
+.stats {
+  color: #888;
+  font-size: 12px;
+  margin-top: 10px;
+}
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>🔍 Evolution OS Code Validator</h1>
+  
+  <textarea id="code" placeholder="Вставьте код приложения сюда...
+
+<app os=&quot;1.0&quot; title=&quot;myapp&quot;>
+  <ui default=&quot;/main&quot;>
+    <page id=&quot;main&quot;>
+      <label align=&quot;center center&quot;>Hello!</label>
+    </page>
+  </ui>
+</app>"></textarea>
+
+  <div class="buttons">
+    <button onclick="doValidate()">✓ Validate</button>
+    <button class="secondary" onclick="loadSample()">Load Sample</button>
+    <button class="secondary" onclick="clearAll()">Clear</button>
+  </div>
+  
+  <div id="result">
+    <span class="empty">Результат проверки появится здесь...</span>
+  </div>
+</div>
+
+<script>
+// === XML Parser ===
+var SCRIPT_OPEN = "<" + "script";
+var SCRIPT_CLOSE = "</" + "script>";
+
+function parseXML(src) {
+  var luaCode = "";
+  var i1 = src.indexOf(SCRIPT_OPEN);
+  if (i1 >= 0) {
+    var i2 = src.indexOf(SCRIPT_CLOSE, i1);
+    if (i2 > i1) {
+      var tagEnd = src.indexOf(">", i1);
+      luaCode = src.substring(tagEnd + 1, i2);
+      src = src.substring(0, tagEnd + 1) + "X" + src.substring(i2);
+    }
+  }
+  var selfClose = ["bluetooth","timer","string","int","bool","float","image","slider","switch","input"];
+  var scRe = new RegExp("<(" + selfClose.join("|") + ")\\b([^>]*?)\\/?>", "g");
+  src = src.replace(scRe, function(m, t, a) {
+    if (m.endsWith("/>")) return m;
+    return "<" + t + a + "/>";
+  });
+  var doc = new DOMParser().parseFromString(src, "text/xml");
+  var err = doc.querySelector("parsererror");
+  if (err) throw new Error(err.textContent.substring(0, 150));
+  var se = doc.querySelector("script");
+  if (se) se.textContent = luaCode;
+  return doc.documentElement;
+}
+
+// === Lua Syntax Check ===
+function checkLuaSyntax(code) {
+  var errs = [];
+  var clean = code
+    .replace(/--\[\[[\s\S]*?\]\]/g, "")
+    .replace(/--[^\n]*/g, "")
+    .replace(/"[^"]*"/g, '""')
+    .replace(/'[^']*'/g, "''")
+    .replace(/\[\[[\s\S]*?\]\]/g, '""');
+  
+  var opens = (clean.match(/\b(function|if|for|while|repeat)\b/g) || []).length;
+  var closes = (clean.match(/\bend\b/g) || []).length;
+  var untils = (clean.match(/\buntil\b/g) || []).length;
+  var expected = opens - untils;
+  
+  if (closes < expected) {
+    errs.push("Не хватает " + (expected - closes) + " 'end' (function/if/for/while)");
+  } else if (closes > expected) {
+    errs.push("Лишних " + (closes - expected) + " 'end'");
+  }
+  
+  var ifs = (clean.match(/\bif\b/g) || []).length;
+  var thens = (clean.match(/\bthen\b/g) || []).length;
+  if (ifs !== thens) {
+    errs.push("Количество 'if' (" + ifs + ") ≠ 'then' (" + thens + ")");
+  }
+  
+  return errs;
+}
+
+// === Main Validation ===
+function validateCode(xmlStr) {
+  var errors = [];
+  var warnings = [];
+  
+  if (!xmlStr.trim()) {
+    errors.push({code: "EMPTY", msg: "Код пустой"});
+    return {valid: false, errors: errors, warnings: warnings};
+  }
+  
+  // 1. XML Parse
+  var app;
+  try {
+    app = parseXML(xmlStr);
+  } catch(e) {
+    errors.push({code: "XML_PARSE", msg: "XML ошибка: " + e.message});
+    return {valid: false, errors: errors, warnings: warnings};
+  }
+  
+  // 2. <app> check
+  if (app.tagName.toLowerCase() !== "app") {
+    errors.push({code: "NO_APP", msg: "Корневой тег должен быть <app>"});
+  } else {
+    var os = app.getAttribute("os");
+    var title = app.getAttribute("title");
+    if (!os) warnings.push({code: "NO_OS", msg: "Нет атрибута os в <app>"});
+    if (!title) {
+      warnings.push({code: "NO_TITLE", msg: "Нет атрибута title в <app>"});
+    } else if (!/^[a-zA-Z][a-zA-Z0-9_]*$/.test(title)) {
+      warnings.push({code: "BAD_TITLE", msg: "title должен быть словом (буквы, цифры, _)"});
+    }
+  }
+  
+  // 3. Collect state variables
+  var stateVars = {};
+  var stateEl = app.querySelector("state");
+  if (stateEl) {
+    for (var i = 0; i < stateEl.children.length; i++) {
+      var name = stateEl.children[i].getAttribute("name");
+      if (name) stateVars[name] = true;
+    }
+  }
+  
+  // 4. Collect pages
+  var pageIds = {}, groupIds = {};
+  var allPages = app.querySelectorAll("page");
+  var allGroups = app.querySelectorAll("group");
+  
+  for (var i = 0; i < allPages.length; i++) {
+    var pid = allPages[i].getAttribute("id");
+    if (!pid) {
+      errors.push({code: "PAGE_NO_ID", msg: "<page> без атрибута id"});
+    } else {
+      pageIds[pid] = true;
+    }
+  }
+  for (var i = 0; i < allGroups.length; i++) {
+    var gid = allGroups[i].getAttribute("id");
+    if (gid) groupIds[gid] = true;
+  }
+  
+  // 5. Check <ui>
+  var uiEl = app.querySelector("ui");
+  if (!uiEl) {
+    errors.push({code: "NO_UI", msg: "Нет секции <ui>"});
+  } else {
+    var def = (uiEl.getAttribute("default") || "").replace(/^\//, "");
+    if (def && !pageIds[def] && !groupIds[def]) {
+      errors.push({code: "BAD_DEFAULT", msg: "default=\"" + def + "\" не найден в page/group"});
+    }
+  }
+  
+  // 6. Collect bindings and handlers
+  var usedBindings = {};
+  var usedHandlers = {};
+  var allEls = app.querySelectorAll("*");
+  
+  for (var i = 0; i < allEls.length; i++) {
+    var el = allEls[i];
+    
+    var bind = el.getAttribute("bind");
+    if (bind) usedBindings[bind] = true;
+    
+    for (var j = 0; j < el.attributes.length; j++) {
+      var val = el.attributes[j].value;
+      var matches = val.match(/\{([^}]+)\}/g);
+      if (matches) {
+        matches.forEach(function(m) {
+          usedBindings[m.slice(1, -1)] = true;
+        });
+      }
+    }
+    
+    ["onclick", "onchange", "onenter", "onblur", "call"].forEach(function(attr) {
+      var fn = el.getAttribute(attr);
+      if (fn) usedHandlers[fn] = true;
+    });
+  }
+  
+  // Check timers
+  var timers = app.querySelectorAll("timer");
+  for (var i = 0; i < timers.length; i++) {
+    var fn = timers[i].getAttribute("call");
+    if (fn) usedHandlers[fn] = true;
+  }
+  
+  // 7. Check bindings vs state
+  for (var v in usedBindings) {
+    if (!stateVars[v]) {
+      warnings.push({code: "UNBOUND_VAR", msg: "Переменная {" + v + "} не объявлена в <state>"});
+    }
+  }
+  
+  // 8. Extract Lua functions
+  var scriptEl = app.querySelector("script");
+  var luaCode = scriptEl ? scriptEl.textContent : "";
+  var luaFunctions = {};
+  var fnRegex = /function\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(/g;
+  var m;
+  while ((m = fnRegex.exec(luaCode)) !== null) {
+    luaFunctions[m[1]] = true;
+  }
+  
+  // 9. Check handlers vs functions
+  for (var fn in usedHandlers) {
+    if (!luaFunctions[fn]) {
+      errors.push({code: "MISSING_FUNC", msg: "Функция \"" + fn + "\" не найдена в <script>"});
+    }
+  }
+  
+  // 10. Lua syntax
+  checkLuaSyntax(luaCode).forEach(function(e) {
+    errors.push({code: "LUA_SYNTAX", msg: e});
+  });
+  
+  return {
+    valid: errors.length === 0,
+    errors: errors,
+    warnings: warnings,
+    stats: {
+      pages: Object.keys(pageIds).length,
+      stateVars: Object.keys(stateVars).length,
+      functions: Object.keys(luaFunctions).length
+    }
+  };
+}
+
+// === UI Functions ===
+function doValidate() {
+  var code = document.getElementById("code").value;
+  var result = validateCode(code);
+  var out = document.getElementById("result");
+  
+  var html = '';
+  
+  if (result.valid) {
+    html += '<div class="status-valid">✓ Код валиден</div>';
+  } else {
+    html += '<div class="status-invalid">✗ Найдены ошибки</div>';
+  }
+  
+  if (result.errors.length > 0) {
+    result.errors.forEach(function(e) {
+      html += '<div class="error-item">❌ ' + e.msg + '</div>';
+    });
+  }
+  
+  if (result.warnings.length > 0) {
+    result.warnings.forEach(function(w) {
+      html += '<div class="warning-item">⚠️ ' + w.msg + '</div>';
+    });
+  }
+  
+  if (result.valid && result.warnings.length === 0) {
+    html += '<div style="color:#22c55e">Всё отлично! Ошибок и предупреждений нет.</div>';
+  }
+  
+  if (result.stats) {
+    html += '<div class="stats">📊 Страниц: ' + result.stats.pages + 
+            ' | Переменных: ' + result.stats.stateVars + 
+            ' | Функций: ' + result.stats.functions + '</div>';
+  }
+  
+  out.innerHTML = html;
+  
+  // Log for API consumers
+  console.log('Validation result:', result);
+}
+
+function loadSample() {
+  document.getElementById("code").value = `<app os="1.0" title="counter">
+  <ui default="/main">
+    <page id="main">
+      <label align="center" y="30%" font="48" color="#fff">{count}</label>
+      <button x="20%" y="60%" w="25%" h="50" bgcolor="#f44" onclick="decrement">-</button>
+      <button x="55%" y="60%" w="25%" h="50" bgcolor="#4f4" onclick="increment">+</button>
+    </page>
+  </ui>
+  
+  <state>
+    <int name="count" default="0"/>
+  </state>
+  
+  <script language="lua">
+    function increment()
+      state.count = state.count + 1
+    end
+    
+    function decrement()
+      state.count = state.count - 1
+    end
+  </script>
+</app>`;
+}
+
+function clearAll() {
+  document.getElementById("code").value = "";
+  document.getElementById("result").innerHTML = '<span class="empty">Результат проверки появится здесь...</span>';
+}
+
+// Global API
+window.validateCode = validateCode;
+</script>
+</body>
+</html>

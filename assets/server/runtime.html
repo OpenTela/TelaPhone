@@ -1,0 +1,852 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>FutureClock Web Runtime</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: #000;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-height: 100vh;
+  font-family: Ubuntu, Segoe UI, sans-serif;
+  overflow-x: hidden;
+}
+#screen {
+  position: relative;
+  width: 410px; height: 502px;
+  background: #000;
+  overflow: hidden;
+  border-radius: 12px;
+  margin-top: 10px;
+  flex-shrink: 0;
+}
+@media (max-width: 420px) {
+  #screen { width: 100vw; height: calc(100vw * 502 / 410); border-radius: 0; margin-top: 0; }
+}
+.fc-page { position: absolute; inset: 0; display: none; }
+.fc-page.active { display: block; }
+.fc-label, .fc-button, .fc-input {
+  position: absolute;
+  font-family: Ubuntu, Segoe UI, sans-serif;
+}
+.fc-label {
+  display: flex; align-items: center;
+  pointer-events: none; font-size: 16px; color: #fff;
+  /* default: wrap */
+  white-space: normal; word-wrap: break-word; overflow: hidden;
+}
+.fc-label.fc-overflow-ellipsis {
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.fc-label.fc-overflow-clip {
+  white-space: nowrap; overflow: hidden; text-overflow: clip;
+}
+.fc-label.fc-overflow-scroll {
+  white-space: nowrap; overflow: hidden;
+}
+.fc-label.fc-overflow-scroll > .fc-scroll-inner {
+  display: inline-block;
+  animation: fc-marquee 8s linear infinite;
+  padding-right: 50px;
+}
+@keyframes fc-marquee {
+  0% { transform: translateX(0); }
+  100% { transform: translateX(-50%); }
+}
+.fc-button {
+  display: flex; align-items: center; justify-content: center;
+  border: none; cursor: pointer; font-size: 16px;
+  color: #fff; background: #333;
+  user-select: none; -webkit-user-select: none;
+  overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+}
+.fc-button:active { filter: brightness(0.8); }
+.fc-input {
+  border: 1px solid #555; background: #222; color: #fff;
+  padding: 0 8px; font-size: 16px; outline: none;
+  overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+}
+.fc-input:focus { border-color: #06f; }
+.fc-slider {
+  position: absolute; -webkit-appearance: none; appearance: none;
+  background: #333; height: 8px; border-radius: 4px; outline: none;
+}
+.fc-slider::-webkit-slider-thumb {
+  -webkit-appearance: none; width: 24px; height: 24px;
+  background: #06f; border-radius: 50%; cursor: pointer;
+}
+.fc-switch { position: absolute; cursor: pointer; border: none; padding: 0; }
+.fc-hidden { display: none !important; }
+
+#load-screen {
+  position: absolute; inset: 0; background: #111;
+  display: flex; flex-direction: column; align-items: center;
+  justify-content: center; color: #fff; z-index: 100;
+  font-size: 14px; gap: 12px;
+}
+#load-screen textarea {
+  width: 90%; height: 55%; background: #1a1a2e; color: #aaffaa;
+  border: 1px solid #333; border-radius: 8px; padding: 8px;
+  font-family: monospace; font-size: 12px; resize: none;
+}
+#load-screen button {
+  padding: 10px 32px; background: #06f; color: #fff;
+  border: none; border-radius: 8px; font-size: 16px; cursor: pointer;
+}
+#load-screen .hint { color: #666; font-size: 12px; }
+#load-screen .status { color: #888; font-size: 11px; }
+
+#con {
+  width: 410px; margin-top: 6px; flex-shrink: 0;
+  background: #0a0a0a; border: 1px solid #333; border-radius: 8px;
+  overflow: hidden;
+}
+@media (max-width: 420px) {
+  #con { width: 100vw; border-radius: 0; }
+}
+#con-bar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 4px 10px; background: #1a1a1a; border-bottom: 1px solid #333;
+}
+#con-bar span { color: #888; font-size: 12px; font-family: monospace; }
+.con-btn {
+  background: #333; color: #ccc; border: none; border-radius: 4px;
+  padding: 3px 10px; font-size: 11px; cursor: pointer; font-family: monospace;
+  margin-left: 4px;
+}
+.con-btn:hover { background: #555; color: #fff; }
+#con-log {
+  max-height: 180px; min-height: 40px; overflow-y: auto;
+  padding: 6px 10px; font-family: monospace; font-size: 12px; color: #aaffaa;
+  white-space: pre-wrap; word-break: break-all;
+}
+.cw { color: #fc0; }
+.ce { color: #f55; }
+.ci { color: #8bf; }
+</style>
+</head>
+<body>
+<div id="screen">
+  <div id="load-screen">
+    <div>FutureClock Web Runtime v0.3.1</div>
+    <textarea id="app-source" placeholder="Paste app.html here..."></textarea>
+    <button id="run-btn">Run</button>
+    <div class="hint">or drag-and-drop app.html file</div>
+    <div class="status" id="lua-status">Loading Lua WASM...</div>
+  </div>
+</div>
+<div id="con">
+  <div id="con-bar">
+    <span>Console</span>
+    <div>
+      <button class="con-btn" id="copy-btn">Copy</button>
+      <button class="con-btn" id="clear-btn">Clear</button>
+    </div>
+  </div>
+  <div id="con-log"></div>
+</div>
+<script src="wasmoon.js" onerror="document.getElementById('lua-status').textContent='wasmoon.js not found'"></script>
+<script>
+var conLogEl = document.getElementById("con-log");
+
+// === Console Buffer (for API) ===
+var consoleBuffer = [];
+var consoleMaxSize = 500;
+
+function clog(msg, cls) {
+  var time = new Date().toISOString();
+  var type = cls === "ce" ? "error" : cls === "cw" ? "warn" : "info";
+  
+  consoleBuffer.push({time: time, type: type, msg: msg});
+  if (consoleBuffer.length > consoleMaxSize) consoleBuffer.shift();
+  
+  var d = document.createElement("div");
+  if (cls) d.className = cls;
+  d.textContent = msg;
+  conLogEl.appendChild(d);
+  conLogEl.scrollTop = 999999;
+  
+  // Отправляем ошибки на сервер для валидации
+  if (cls === "ce" || cls === "cw") {
+    try {
+      fetch("/console", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({msg: msg, type: type})
+      }).catch(function() {});
+    } catch(e) {}
+  }
+  
+  if (cls === "ce" && window.FlutterError) {
+    window.FlutterError.postMessage(msg);
+  }
+}
+
+// === Console API ===
+window.getConsole = function(since) {
+  if (!since) return consoleBuffer.slice();
+  return consoleBuffer.filter(function(e) { return e.time > since; });
+};
+window.clearConsole = function() {
+  consoleBuffer = [];
+  conLogEl.innerHTML = "";
+};
+
+window.onerror = function(msg, src, line, col, err) {
+  var loc = "";
+  if (line) loc = " (line " + line + ")";
+  clog("[error]" + loc + " " + msg, "ce");
+  return true;
+};
+window.addEventListener("unhandledrejection", function(e) {
+  clog("[promise] " + String(e.reason), "ce");
+});
+
+function getConText() {
+  var text = "";
+  var lines = conLogEl.querySelectorAll("div");
+  for (var i = 0; i < lines.length; i++) text += lines[i].textContent + "\n";
+  return text;
+}
+
+document.getElementById("copy-btn").addEventListener("click", function(e) {
+  e.preventDefault();
+  var text = getConText();
+  navigator.clipboard.writeText(text).then(function() {
+    document.getElementById("copy-btn").textContent = "OK!";
+    setTimeout(function() { document.getElementById("copy-btn").textContent = "Copy"; }, 1200);
+  });
+});
+
+document.getElementById("clear-btn").addEventListener("click", function(e) {
+  e.preventDefault();
+  conLogEl.innerHTML = "";
+});
+
+// --- Globals ---
+var appState = {};
+var bindings = {};
+var pages = {};
+var widgets = {};
+var groupDefaults = {};
+var currentPage = null;
+var activeTimers = [];
+var luaEngine = null;
+var luaReady = false;
+
+function getState(key) { return appState["_" + key] || ""; }
+function setState(key, value) {
+  var s = String(value);
+  if (appState["_" + key] === s) return;
+  appState["_" + key] = s;
+  var fns = bindings[key];
+  if (fns) { for (var i = 0; i < fns.length; i++) fns[i](); }
+}
+function sub(key, fn) {
+  if (!bindings[key]) bindings[key] = [];
+  bindings[key].push(fn);
+}
+function extractVars(t) {
+  var v = [], r = /\{(\w+)\}/g, m;
+  while ((m = r.exec(t)) !== null) v.push(m[1]);
+  return v;
+}
+function resolve(t) {
+  return t.replace(/\{(\w+)\}/g, function(_, k) { return getState(k); });
+}
+
+// --- Lua via Wasmoon ---
+function callLua(fn) {
+  if (!luaReady || !luaEngine) {
+    clog("[no-lua] " + fn + "()", "cw");
+    return;
+  }
+  try {
+    var f = luaEngine.global.get(fn);
+    if (typeof f === "function") f();
+    else clog("[lua] " + fn + " is not a function", "cw");
+  } catch(err) {
+    clog("[lua-err] " + fn + ": " + err.message, "ce");
+  }
+}
+
+// --- Lua Forward Declaration Preprocessor ---
+function luaPreprocess(src) {
+  var lines = src.split("\n");
+  var names = [];
+  var pat = /^(\s*)local\s+function\s+(\w+)\s*\(/;
+  for (var i = 0; i < lines.length; i++) {
+    var m = pat.exec(lines[i]);
+    if (m) names.push(m[2]);
+  }
+  if (names.length === 0) return src;
+  var out = "local " + names.join(", ") + "\n";
+  for (var i = 0; i < lines.length; i++) {
+    var m = pat.exec(lines[i]);
+    if (m) {
+      out += m[1] + m[2] + " = function(" + lines[i].substring(m[0].length) + "\n";
+    } else {
+      out += lines[i] + "\n";
+    }
+  }
+  return out;
+}
+
+async function setupLua(app) {
+  if (!luaReady || !luaEngine) return;
+  var G = luaEngine.global;
+  G.set("__fc_get_state", function(key) { return getState(key); });
+  G.set("__fc_set_state", function(key, val) { setState(key, String(val)); });
+  await luaEngine.doString(
+    "state = setmetatable({}, {" +
+    "  __index = function(t, k) return __fc_get_state(k) end," +
+    "  __newindex = function(t, k, v) __fc_set_state(k, tostring(v)) end" +
+    "})"
+  );
+  G.set("navigate", function(page) { navigateTo(page); });
+  G.set("focus", function(id) {
+    var w = widgets[id];
+    if (w && w.tagName === "INPUT") { w.focus(); return true; }
+    return false;
+  });
+  G.set("setAttr", function(id, attr, val) {
+    var w = widgets[id];
+    if (!w) return;
+    if (attr === "bgcolor") w.style.backgroundColor = val;
+    else if (attr === "color") w.style.color = val;
+    else if (attr === "text") w.textContent = val;
+    else if (attr === "visible") w.classList.toggle("fc-hidden", val !== "true" && val !== "1");
+  });
+  G.set("getAttr", function(id, attr) {
+    var w = widgets[id];
+    if (!w) return "";
+    if (attr === "bgcolor") return w.style.backgroundColor || "";
+    if (attr === "color") return w.style.color || "";
+    if (attr === "text") return w.textContent || "";
+    if (attr === "visible") return w.classList.contains("fc-hidden") ? "false" : "true";
+    return "";
+  });
+  G.set("print", function() {
+    var parts = [];
+    for (var i = 0; i < arguments.length; i++) parts.push(String(arguments[i]));
+    clog("[lua] " + parts.join("\t"));
+  });
+  G.set("app_launch", function(name) { clog("[lua] app_launch: " + name, "ci"); });
+  G.set("app_home", function() { clog("[lua] app_home", "ci"); });
+
+  var se = app.querySelector("script");
+  if (se && se.textContent && se.textContent !== "X") {
+    var code = luaPreprocess(se.textContent);
+    try {
+      await luaEngine.doString(code);
+      clog("Script OK", "ci");
+    } catch(err) {
+      clog("[lua-err] " + err.message, "ce");
+    }
+  }
+}
+
+// --- XML Parser (FIXED) ---
+var SCRIPT_OPEN = "<" + "script";
+var SCRIPT_CLOSE = "</" + "script>";
+
+function parseXML(src) {
+  var luaCode = "";
+  var i1 = src.indexOf(SCRIPT_OPEN);
+  if (i1 >= 0) {
+    var i2 = src.indexOf(SCRIPT_CLOSE, i1);
+    if (i2 > i1) {
+      var tagEnd = src.indexOf(">", i1);
+      luaCode = src.substring(tagEnd + 1, i2);
+      src = src.substring(0, tagEnd + 1) + "X" + src.substring(i2);
+    }
+  }
+  var selfClose = ["bluetooth","timer","string","int","bool","float","image","slider","switch","input"];
+  var scRe = new RegExp("<(" + selfClose.join("|") + ")\\b([^>]*?)\\/?\\s*>", "g");
+  src = src.replace(scRe, function(m, t, a) {
+    if (m.charAt(m.length - 2) === "/") return m;
+    return "<" + t + a + "/>";
+  });
+  var doc = new DOMParser().parseFromString(src, "text/xml");
+  var err = doc.querySelector("parsererror");
+  if (err) {
+    clog("[xml-err] " + err.textContent.substring(0, 200), "ce");
+    throw new Error("XML parse error");
+  }
+  var se = doc.querySelector("script");
+  if (se) se.textContent = luaCode;
+  return doc.documentElement;
+}
+
+// === Validation API ===
+window.validateCode = function(xmlStr) {
+  var errors = [];
+  var warnings = [];
+  
+  var app;
+  try { app = parseXML(xmlStr); } 
+  catch(e) { 
+    errors.push({code: "XML_PARSE", msg: "XML ошибка: " + e.message});
+    return {valid: false, errors: errors, warnings: warnings};
+  }
+  
+  if (app.tagName.toLowerCase() !== "app") {
+    errors.push({code: "NO_APP", msg: "Корневой тег должен быть <app>"});
+  }
+  
+  // Collect state
+  var stateVars = {};
+  var stateEl = app.querySelector("state");
+  if (stateEl) {
+    for (var i = 0; i < stateEl.children.length; i++) {
+      var name = stateEl.children[i].getAttribute("name");
+      if (name) stateVars[name] = true;
+    }
+  }
+  
+  // Collect pages
+  var pageIds = {};
+  var allPages = app.querySelectorAll("page");
+  for (var i = 0; i < allPages.length; i++) {
+    var pid = allPages[i].getAttribute("id");
+    if (pid) pageIds[pid] = true;
+  }
+  
+  // Check bindings and handlers
+  var usedBindings = {};
+  var usedHandlers = {};
+  var allEls = app.querySelectorAll("*");
+  for (var i = 0; i < allEls.length; i++) {
+    var el = allEls[i];
+    var bind = el.getAttribute("bind");
+    if (bind) usedBindings[bind] = true;
+    for (var j = 0; j < el.attributes.length; j++) {
+      var matches = el.attributes[j].value.match(/\{([^}]+)\}/g);
+      if (matches) matches.forEach(function(m) { usedBindings[m.slice(1,-1)] = true; });
+    }
+    ["onclick","onchange","onenter","onblur","call"].forEach(function(a) {
+      var fn = el.getAttribute(a); if (fn) usedHandlers[fn] = true;
+    });
+  }
+  
+  for (var v in usedBindings) {
+    if (!stateVars[v]) warnings.push({code: "UNBOUND", msg: "{" + v + "} не в <state>"});
+  }
+  
+  // Check for multiple labels inside buttons
+  var allButtons = app.querySelectorAll("button");
+  for (var i = 0; i < allButtons.length; i++) {
+    var btn = allButtons[i];
+    var nestedLabels = btn.querySelectorAll("label");
+    if (nestedLabels.length > 1) {
+      var btnId = btn.getAttribute("id") || btn.getAttribute("onclick") || ("button #" + (i+1));
+      warnings.push({
+        code: "MULTI_LABEL", 
+        msg: "<button " + btnId + "> содержит " + nestedLabels.length + " вложенных <label> — только первый будет использован"
+      });
+    }
+  }
+  
+  var scriptEl = app.querySelector("script");
+  var luaCode = scriptEl ? scriptEl.textContent : "";
+  var luaFuncs = {};
+  var m, re = /function\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(/g;
+  while ((m = re.exec(luaCode)) !== null) luaFuncs[m[1]] = true;
+  
+  for (var fn in usedHandlers) {
+    if (!luaFuncs[fn]) errors.push({code: "MISSING_FUNC", msg: fn + " не найдена"});
+  }
+  
+  return {
+    valid: errors.length === 0, 
+    errors: errors, 
+    warnings: warnings,
+    stats: {pages: Object.keys(pageIds).length, stateVars: Object.keys(stateVars).length, functions: Object.keys(luaFuncs).length}
+  };
+};
+
+// --- Build App ---
+async function buildApp(xmlStr) {
+  appState = {};
+  bindings = {};
+  pages = {};
+  widgets = {};
+  currentPage = null;
+  activeTimers.forEach(function(t) { clearInterval(t); });
+  activeTimers = [];
+
+  var screen = document.getElementById("screen");
+  document.getElementById("load-screen").style.display = "none";
+  var old = screen.querySelectorAll(".fc-page");
+  for (var i = 0; i < old.length; i++) old[i].remove();
+
+  clog("Parsing...", "ci");
+  var app = parseXML(xmlStr);
+
+  var stateEl = app.querySelector("state");
+  if (stateEl) {
+    var ch = stateEl.children;
+    for (var i = 0; i < ch.length; i++) {
+      var name = ch[i].getAttribute("name");
+      var def = ch[i].getAttribute("default") || "";
+      appState["_" + name] = def;
+    }
+    clog("State: " + ch.length + " vars", "ci");
+  }
+
+  var uiEl = app.querySelector("ui");
+  var defaultPage = uiEl ? (uiEl.getAttribute("default") || "").replace(/^\//, "") : "";
+
+  // Очищаем маппинг group id -> default page
+  groupDefaults = {};
+  
+  function processContainer(container) {
+    var ch = container.children;
+    for (var i = 0; i < ch.length; i++) {
+      var tag = ch[i].tagName.toLowerCase();
+      if (tag === "page") {
+        var pid = ch[i].getAttribute("id");
+        var div = document.createElement("div");
+        div.className = "fc-page";
+        div.id = "page-" + pid;
+        div.style.background = ch[i].getAttribute("bgcolor") || "#000";
+        screen.appendChild(div);
+        pages[pid] = div;
+        buildWidgets(ch[i], div);
+        clog("Page: " + pid, "ci");
+      } else if (tag === "group") {
+        var groupId = ch[i].getAttribute("id");
+        var groupDefault = ch[i].getAttribute("default");
+        if (groupId) {
+          // Запоминаем default группы, или null чтобы взять первую страницу
+          groupDefaults[groupId] = groupDefault || null;
+        }
+        processContainer(ch[i]);
+        // Если default не был указан — берём первую страницу из группы
+        if (groupId && !groupDefaults[groupId]) {
+          var firstPage = ch[i].querySelector("page");
+          if (firstPage) {
+            groupDefaults[groupId] = firstPage.getAttribute("id");
+          }
+        }
+      }
+    }
+  }
+  if (uiEl) processContainer(uiEl);
+
+  // Резолвим startPage: если это группа — navigateTo разберётся
+  var startPage = defaultPage || Object.keys(pages)[0] || "";
+  clog("Start: " + startPage, "ci");
+  if (startPage) navigateTo(startPage);
+
+  if (luaReady) {
+    if (luaEngine) try { luaEngine.global.close(); } catch(e) {}
+    var factory = new wasmoon.LuaFactory();
+    luaEngine = await factory.createEngine();
+    await setupLua(app);
+  }
+
+  var timerEls = app.querySelectorAll("timer");
+  for (var i = 0; i < timerEls.length; i++) {
+    var iv = parseInt(timerEls[i].getAttribute("interval")) || 1000;
+    var fn = timerEls[i].getAttribute("call") || "";
+    if (fn) {
+      (function(f, t) {
+        activeTimers.push(setInterval(function() { callLua(f); }, t));
+      })(fn, iv);
+    }
+  }
+  clog("Done!", "ci");
+}
+
+// --- Widget builders ---
+function buildWidgets(pageXml, pageDom) {
+  var ch = pageXml.children;
+  for (var i = 0; i < ch.length; i++) {
+    var tag = ch[i].tagName.toLowerCase();
+    if (tag === "label") buildLabel(ch[i], pageDom);
+    else if (tag === "button") buildButton(ch[i], pageDom);
+    else if (tag === "input") buildInput(ch[i], pageDom);
+    else if (tag === "slider") buildSlider(ch[i], pageDom);
+    else if (tag === "switch") buildSwitch(ch[i], pageDom);
+  }
+}
+
+function normUnit(v) {
+  if (!v) return "";
+  if (v.indexOf("%") >= 0) return v;
+  if (/^\d+$/.test(v)) return v + "px";
+  return v;
+}
+
+function applyGeometry(el, xml) {
+  var x = xml.getAttribute("x"), y = xml.getAttribute("y");
+  var w = xml.getAttribute("w"), h = xml.getAttribute("h");
+  if (x) el.style.left = normUnit(x);
+  if (y) el.style.top = normUnit(y);
+  if (w) el.style.width = normUnit(w);
+  if (h) el.style.height = normUnit(h);
+  var r = xml.getAttribute("radius");
+  if (r) el.style.borderRadius = r + "px";
+  var z = xml.getAttribute("z") || xml.getAttribute("zindex") || xml.getAttribute("z-index");
+  if (z) el.style.zIndex = z;
+  var al = xml.getAttribute("align");
+  if (al && !x) {
+    var parts = al.split(/\s+/);
+    if (parts[0] === "center") { el.style.left = "50%"; el.style.transform = "translateX(-50%)"; }
+    else if (parts[0] === "right") el.style.right = "0";
+    if (parts[1] === "center" && !y) {
+      el.style.top = "50%";
+      el.style.transform = (el.style.transform || "") + " translateY(-50%)";
+    } else if (parts[1] === "bottom" && !y) el.style.bottom = "0";
+  }
+}
+
+function applyFont(el, xml) {
+  var f = xml.getAttribute("font");
+  if (f) el.style.fontSize = f + "px";
+}
+
+function applyColor(el, xml, attr, prop) {
+  var v = xml.getAttribute(attr);
+  if (!v) return;
+  if (v.charAt(0) === "{" && v.charAt(v.length - 1) === "}") {
+    var varName = v.substring(1, v.length - 1);
+    var fn = function() { var c = getState(varName); if (c) el.style[prop] = c; };
+    sub(varName, fn); fn();
+  } else el.style[prop] = v;
+}
+
+function applyVisible(el, xml) {
+  var v = xml.getAttribute("visible");
+  if (!v) return;
+  if (v.charAt(0) === "{" && v.charAt(v.length - 1) === "}") {
+    var varName = v.substring(1, v.length - 1);
+    var fn = function() {
+      var s = getState(varName);
+      el.classList.toggle("fc-hidden", s !== "true" && s !== "1");
+    };
+    sub(varName, fn); fn();
+  }
+}
+
+function applyText(el, xml) {
+  var raw = xml.textContent.trim();
+  if (!raw || raw === "X") return;
+  var vars = extractVars(raw);
+  var ovMode = xml.getAttribute("overflow");
+  
+  if (vars.length > 0) {
+    var fn = function() {
+      var text = resolve(raw);
+      if (ovMode === "scroll" && el._scrollInner) {
+        el._scrollInner.textContent = text + "   " + text;
+      } else {
+        el.textContent = text;
+      }
+    };
+    for (var i = 0; i < vars.length; i++) sub(vars[i], fn);
+    fn();
+  } else {
+    el.textContent = raw;
+  }
+}
+
+function buildLabel(xml, parent) {
+  var el = document.createElement("div");
+  el.className = "fc-label";
+  var id = xml.getAttribute("id");
+  if (id) widgets[id] = el;
+  applyGeometry(el, xml); applyFont(el, xml);
+  applyColor(el, xml, "color", "color");
+  applyColor(el, xml, "bgcolor", "backgroundColor");
+  applyVisible(el, xml);
+  applyText(el, xml);
+  applyOverflow(el, xml); // after text so scroll can wrap it
+  parent.appendChild(el);
+}
+
+function applyOverflow(el, xml) {
+  var ov = xml.getAttribute("overflow");
+  if (!ov) return; // default is wrap (set in CSS)
+  
+  if (ov === "ellipsis") {
+    el.classList.add("fc-overflow-ellipsis");
+  } else if (ov === "clip") {
+    el.classList.add("fc-overflow-clip");
+  } else if (ov === "scroll") {
+    el.classList.add("fc-overflow-scroll");
+    // Wrap content in inner span for marquee
+    var origText = el.textContent || "";
+    el.innerHTML = "";
+    var inner = document.createElement("span");
+    inner.className = "fc-scroll-inner";
+    inner.textContent = origText + "   " + origText; // duplicate for seamless loop
+    el.appendChild(inner);
+    el._scrollInner = inner; // save ref for binding updates
+  }
+  // "wrap" is default, no class needed
+}
+
+function buildButton(xml, parent) {
+  var el = document.createElement("div");
+  el.className = "fc-button";
+  var id = xml.getAttribute("id");
+  if (id) widgets[id] = el;
+  applyGeometry(el, xml); applyFont(el, xml);
+  applyColor(el, xml, "bgcolor", "backgroundColor");
+  applyColor(el, xml, "color", "color");
+  applyVisible(el, xml); applyText(el, xml);
+  var oc = xml.getAttribute("onclick");
+  var hr = xml.getAttribute("href");
+  el.addEventListener("click", function() {
+    if (hr) navigateTo(hr);
+    else if (oc) callLua(oc);
+  });
+  parent.appendChild(el);
+}
+
+function buildInput(xml, parent) {
+  var el = document.createElement("input");
+  el.className = "fc-input";
+  el.type = xml.getAttribute("password") === "true" ? "password" : "text";
+  var id = xml.getAttribute("id");
+  if (id) widgets[id] = el;
+  applyGeometry(el, xml); applyVisible(el, xml);
+  var ph = xml.getAttribute("placeholder");
+  if (ph) el.placeholder = ph;
+  var bind = xml.getAttribute("bind");
+  if (bind) {
+    var fn = function() { if (document.activeElement !== el) el.value = getState(bind); };
+    sub(bind, fn); fn();
+    el.addEventListener("input", function() { setState(bind, el.value); });
+  }
+  var onenter = xml.getAttribute("onenter");
+  if (onenter) {
+    el.addEventListener("keydown", function(e) {
+      if (e.key === "Enter") { e.preventDefault(); el.blur(); callLua(onenter); }
+    });
+  }
+  parent.appendChild(el);
+}
+
+function buildSlider(xml, parent) {
+  var el = document.createElement("input");
+  el.className = "fc-slider"; el.type = "range";
+  var id = xml.getAttribute("id");
+  if (id) widgets[id] = el;
+  applyGeometry(el, xml); applyVisible(el, xml);
+  el.min = xml.getAttribute("min") || "0";
+  el.max = xml.getAttribute("max") || "100";
+  var bind = xml.getAttribute("bind");
+  if (bind) {
+    var fn = function() { el.value = getState(bind) || "0"; };
+    sub(bind, fn); fn();
+    el.addEventListener("input", function() { setState(bind, el.value); });
+  }
+  parent.appendChild(el);
+}
+
+function buildSwitch(xml, parent) {
+  var el = document.createElement("button");
+  el.className = "fc-switch";
+  var id = xml.getAttribute("id");
+  if (id) widgets[id] = el;
+  applyGeometry(el, xml);
+  if (!xml.getAttribute("w")) el.style.width = "50px";
+  if (!xml.getAttribute("h")) el.style.height = "26px";
+  var bind = xml.getAttribute("bind");
+  function render() {
+    var on = bind ? (getState(bind) === "true") : false;
+    el.style.background = on ? "#4caf50" : "#555";
+    el.style.borderRadius = "13px";
+    el.innerHTML = '<div style="width:22px;height:22px;background:#fff;border-radius:50%;position:absolute;top:2px;left:' + (on ? "26px" : "2px") + ';transition:left 0.15s"></div>';
+  }
+  if (bind) {
+    sub(bind, render); render();
+    el.addEventListener("click", function() {
+      setState(bind, getState(bind) === "true" ? "false" : "true");
+    });
+  }
+  applyVisible(el, xml);
+  parent.appendChild(el);
+}
+
+function showPage(pageId) {
+  var c = pageId.replace(/^\//, "");
+  Object.keys(pages).forEach(function(k) { pages[k].classList.remove("active"); });
+  if (pages[c]) { pages[c].classList.add("active"); currentPage = c; }
+}
+
+// Navigate with group resolution
+function navigateTo(target) {
+  var c = target.replace(/^\//, "");
+  if (!pages[c] && groupDefaults[c]) {
+    c = groupDefaults[c];
+  }
+  showPage(c);
+}
+
+// --- Load handlers ---
+document.getElementById("run-btn").addEventListener("click", function() {
+  var src = document.getElementById("app-source").value.trim();
+  if (src) buildApp(src).catch(function(e) { clog("[err] " + e.message, "ce"); });
+});
+
+var scr = document.getElementById("screen");
+scr.addEventListener("dragover", function(e) { e.preventDefault(); });
+scr.addEventListener("drop", function(e) {
+  e.preventDefault();
+  var f = e.dataTransfer.files[0];
+  if (f) {
+    var reader = new FileReader();
+    reader.onload = function(ev) {
+      buildApp(ev.target.result).catch(function(err) { clog("[err] " + err.message, "ce"); });
+    };
+    reader.readAsText(f);
+  }
+});
+
+// --- Exported for external control ---
+window.loadApp = function(code) {
+  return buildApp(code);
+};
+
+// --- Init ---
+clog("Loading Lua...", "ci");
+
+var factory = new wasmoon.LuaFactory();
+factory.createEngine().then(function(engine) {
+  luaEngine = engine;
+  luaReady = true;
+  clog("Lua ready!", "ci");
+  document.getElementById("lua-status").textContent = "Lua ready!";
+  
+  // Autoload only on /app path
+  if (window.location.pathname === '/app') {
+    fetch('/app/code').then(function(res) {
+      if (res.ok) return res.text();
+      return null;
+    }).then(function(code) {
+      if (code) {
+        clog("Auto-loading app...", "ci");
+        buildApp(code).catch(function(e) { clog("[auto-err] " + e.message, "ce"); });
+      } else {
+        clog("No app loaded. Go to / to enter code.", "cw");
+      }
+    }).catch(function(e) {
+      clog("No app loaded", "cw");
+    });
+  }
+  
+}).catch(function(err) {
+  clog("[wasm-err] " + err.message, "ce");
+  document.getElementById("lua-status").textContent = "Lua failed: " + err.message;
+});
+</script>
+</body>
+</html>

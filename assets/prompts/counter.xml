@@ -1,0 +1,36 @@
+<app>
+  <ui default="/main">
+    <page id="main">
+      <label align="center" y="30%" font="72" color="#fff">{count}</label>
+      
+      <button x="10%" y="60%" w="35%" h="60" bgcolor="#ef4444" font="48" onclick="dec">
+        −
+      </button>
+      <button x="55%" y="60%" w="35%" h="60" bgcolor="#22c55e" font="48" onclick="inc">
+        +
+      </button>
+      
+      <button align="center" y="85%" w="40%" h="35" bgcolor="#333" onclick="reset">
+        Сброс
+      </button>
+    </page>
+  </ui>
+  
+  <state>
+    <int name="count" default="0"/>
+  </state>
+  
+  <script language="lua">
+    function inc()
+      state.count = state.count + 1
+    end
+    
+    function dec()
+      state.count = state.count - 1
+    end
+    
+    function reset()
+      state.count = 0
+    end
+  </script>
+</app>

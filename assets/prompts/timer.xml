@@ -1,0 +1,57 @@
+<app>
+  <ui default="/main">
+    <page id="main">
+      <label align="center" y="15%" font="72" color="#fff">{time}</label>
+      <label align="center" y="35%" font="16" color="#888">{status}</label>
+      
+      <button x="10%" y="55%" w="35%" h="50" bgcolor="#22c55e" onclick="start">
+        ▶ Старт
+      </button>
+      <button x="55%" y="55%" w="35%" h="50" bgcolor="#ef4444" onclick="stop">
+        ⏹ Стоп
+      </button>
+      
+      <button align="center" y="75%" w="50%" h="40" bgcolor="#333" onclick="reset">
+        Сброс
+      </button>
+    </page>
+  </ui>
+  
+  <state>
+    <string name="time" default="00:00"/>
+    <string name="status" default="Остановлен"/>
+    <bool name="running" default="false"/>
+  </state>
+  
+  <timer interval="1000" call="tick"/>
+  
+  <script language="lua">
+    local seconds = 0
+    
+    function tick()
+      if not state.running then return end
+      
+      seconds = seconds + 1
+      local m = math.floor(seconds / 60)
+      local s = seconds % 60
+      state.time = string.format("%02d:%02d", m, s)
+    end
+    
+    function start()
+      state.running = true
+      state.status = "Работает"
+    end
+    
+    function stop()
+      state.running = false
+      state.status = "Пауза"
+    end
+    
+    function reset()
+      state.running = false
+      seconds = 0
+      state.time = "00:00"
+      state.status = "Остановлен"
+    end
+  </script>
+</app>

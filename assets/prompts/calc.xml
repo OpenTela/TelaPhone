@@ -1,0 +1,84 @@
+<app>
+  <ui default="/main">
+    <page id="main">
+      <label id="display" x="5%" y="5%" w="90%" h="60" 
+             bgcolor="#222" color="#0f0" font="48"
+             text-align="right center" radius="8">{display}</label>
+      
+      <!-- Ряд 1: C ( ) / -->
+      <button x="5%" y="25%" w="21%" h="40" bgcolor="#666" onclick="clear">C</button>
+      <button x="28%" y="25%" w="21%" h="40" bgcolor="#666" onclick="addChar">(</button>
+      <button x="51%" y="25%" w="21%" h="40" bgcolor="#666" onclick="addChar">)</button>
+      <button x="74%" y="25%" w="21%" h="40" bgcolor="#f90" onclick="addOp">/</button>
+      
+      <!-- Ряд 2: 7 8 9 * -->
+      <button x="5%" y="35%" w="21%" h="40" bgcolor="#333" onclick="addChar">7</button>
+      <button x="28%" y="35%" w="21%" h="40" bgcolor="#333" onclick="addChar">8</button>
+      <button x="51%" y="35%" w="21%" h="40" bgcolor="#333" onclick="addChar">9</button>
+      <button x="74%" y="35%" w="21%" h="40" bgcolor="#f90" onclick="addOp">*</button>
+      
+      <!-- Ряд 3: 4 5 6 - -->
+      <button x="5%" y="45%" w="21%" h="40" bgcolor="#333" onclick="addChar">4</button>
+      <button x="28%" y="45%" w="21%" h="40" bgcolor="#333" onclick="addChar">5</button>
+      <button x="51%" y="45%" w="21%" h="40" bgcolor="#333" onclick="addChar">6</button>
+      <button x="74%" y="45%" w="21%" h="40" bgcolor="#f90" onclick="addOp">-</button>
+      
+      <!-- Ряд 4: 1 2 3 + -->
+      <button x="5%" y="55%" w="21%" h="40" bgcolor="#333" onclick="addChar">1</button>
+      <button x="28%" y="55%" w="21%" h="40" bgcolor="#333" onclick="addChar">2</button>
+      <button x="51%" y="55%" w="21%" h="40" bgcolor="#333" onclick="addChar">3</button>
+      <button x="74%" y="55%" w="21%" h="40" bgcolor="#f90" onclick="addOp">+</button>
+      
+      <!-- Ряд 5: 0 . = -->
+      <button x="5%" y="65%" w="44%" h="40" bgcolor="#333" onclick="addChar">0</button>
+      <button x="51%" y="65%" w="21%" h="40" bgcolor="#333" onclick="addChar">.</button>
+      <button x="74%" y="65%" w="21%" h="40" bgcolor="#3b82f6" onclick="calculate">=</button>
+    </page>
+  </ui>
+  
+  <state>
+    <string name="display" default="0"/>
+    <string name="expr" default=""/>
+  </state>
+  
+  <script language="lua">
+    function clear()
+      state.expr = ""
+      state.display = "0"
+    end
+    
+    function addChar()
+      local char = event.text
+      if state.expr == "" and state.display == "0" then
+        state.expr = char
+      else
+        state.expr = state.expr .. char
+      end
+      state.display = state.expr
+    end
+    
+    function addOp()
+      local op = event.text
+      if state.expr ~= "" then
+        state.expr = state.expr .. op
+        state.display = state.expr
+      end
+    end
+    
+    function calculate()
+      if state.expr == "" then return end
+      
+      local fn = load("return " .. state.expr)
+      if fn then
+        local ok, result = pcall(fn)
+        if ok then
+          state.display = tostring(result)
+          state.expr = tostring(result)
+        else
+          state.display = "Error"
+          state.expr = ""
+        end
+      end
+    end
+  </script>
+</app>

@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>FutureClock UI Preview</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #000; color: #eee; height: 100vh; overflow: hidden; }
+#screen { position: relative; width: 100%; height: 100%; background: #000; overflow: hidden; }
+#status { position: fixed; bottom: 8px; left: 8px; right: 8px; font-size: 11px; color: #666; text-align: center; pointer-events: none; }
+#status.warn { color: #f90; }
+.fc-page { position: absolute; inset: 0; display: none; }
+.fc-page.active { display: block; }
+.fc-label, .fc-button { position: absolute; display: flex; align-items: flex-start; justify-content: flex-start; }
+.fc-button { cursor: pointer; background: #333; border-radius: 4px; padding: 4px 8px; user-select: none; }
+.fc-button:active { filter: brightness(0.7); }
+.fc-input { position: absolute; background: #222; color: #fff; border: 1px solid #444; border-radius: 4px; padding: 4px 8px; font-size: 14px; }
+.fc-slider { position: absolute; -webkit-appearance: none; background: #333; height: 8px; border-radius: 4px; }
+.fc-slider::-webkit-slider-thumb { -webkit-appearance: none; width: 20px; height: 20px; background: #0af; border-radius: 50%; cursor: pointer; }
+.fc-switch { position: absolute; border: none; cursor: pointer; padding: 0; }
+.fc-hidden { display: none !important; }
+</style>
+</head>
+<body>
+<div id="screen"></div>
+<div id="status">UI Preview • Lua скрипты не выполняются</div>
+
+<script>
+var appState = {};
+var bindings = {};
+var pages = {};
+var widgets = {};
+var currentPage = null;
+
+function setStatus(msg, warn) {
+  var el = document.getElementById("status");
+  el.textContent = msg;
+  el.className = warn ? "warn" : "";
+}
+
+function getState(key) { return appState["_" + key] || ""; }
+function setState(key, value) {
+  if (appState["_" + key] === value) return;
+  appState["_" + key] = value;
+  var fns = bindings[key];
+  if (fns) for (var i = 0; i < fns.length; i++) fns[i]();
+}
+function sub(key, fn) {
+  if (!bindings[key]) bindings[key] = [];
+  bindings[key].push(fn);
+}
+function extractVars(t) {
+  var v = [], r = /\{(\w+)\}/g, m;
+  while ((m = r.exec(t)) !== null) v.push(m[1]);
+  return v;
+}
+function resolve(t) {
+  return t.replace(/\{(\w+)\}/g, function(_, k) { return getState(k); });
+}
+
+// XML Parser
+function parseXML(src) {
+  // Extract Lua code (but we won't run it)
+  src = src.replace(/<script[^>]*>[\s\S]*?<\/script>/g, "<script>X</script>");
+  // Self-closing tags
+  var selfClose = ["bluetooth","timer","string","int","bool","float","image","slider","switch","input"];
+  var scRe = new RegExp("<(" + selfClose.join("|") + ")\\b([^>]*?)\\/?>", "g");
+  src = src.replace(scRe, function(m, t, a) {
+    if (m.endsWith("/>")) return m;
+    return "<" + t + a + "/>";
+  });
+  var doc = new DOMParser().parseFromString(src, "text/xml");
+  var err = doc.querySelector("parsererror");
+  if (err) throw new Error("XML: " + err.textContent.substring(0, 100));
+  return doc.documentElement;
+}
+
+// Build App
+function buildApp(xmlStr) {
+  appState = {};
+  bindings = {};
+  pages = {};
+  widgets = {};
+  
+  var screen = document.getElementById("screen");
+  screen.innerHTML = "";
+
+  var app = parseXML(xmlStr);
+
+  // State defaults
+  var stateEl = app.querySelector("state");
+  if (stateEl) {
+    var ch = stateEl.children;
+    for (var i = 0; i < ch.length; i++) {
+      var name = ch[i].getAttribute("name");
+      var def = ch[i].getAttribute("default") || "";
+      appState["_" + name] = def;
+    }
+  }
+
+  // Pages
+  var uiEl = app.querySelector("ui");
+  var defaultPage = uiEl ? (uiEl.getAttribute("default") || "").replace(/^\//, "") : "";
+
+  function processContainer(container) {
+    var ch = container.children;
+    for (var i = 0; i < ch.length; i++) {
+      var tag = ch[i].tagName.toLowerCase();
+      if (tag === "page") {
+        var pid = ch[i].getAttribute("id");
+        var pbg = ch[i].getAttribute("bgcolor") || "#000";
+        var div = document.createElement("div");
+        div.className = "fc-page";
+        div.style.background = pbg;
+        screen.appendChild(div);
+        pages[pid] = div;
+        buildWidgets(ch[i], div);
+      } else if (tag === "group") {
+        processContainer(ch[i]);
+      }
+    }
+  }
+
+  if (uiEl) processContainer(uiEl);
+
+  var startPage = defaultPage ||
+    (uiEl && uiEl.querySelector("group") ? uiEl.querySelector("group").getAttribute("default") : "") ||
+    Object.keys(pages)[0] || "";
+  if (startPage) showPage(startPage);
+
+  // Check for scripts
+  var hasScript = app.querySelector("script");
+  var hasTimer = app.querySelector("timer");
+  if (hasScript || hasTimer) {
+    setStatus("UI Preview • Lua скрипты не выполняются", true);
+  } else {
+    setStatus("UI Preview • " + Object.keys(pages).length + " page(s)");
+  }
+}
+
+// Widget builders
+function buildWidgets(pageXml, pageDom) {
+  var ch = pageXml.children;
+  for (var i = 0; i < ch.length; i++) {
+    var tag = ch[i].tagName.toLowerCase();
+    if (tag === "label") buildLabel(ch[i], pageDom);
+    else if (tag === "button") buildButton(ch[i], pageDom);
+    else if (tag === "input") buildInput(ch[i], pageDom);
+    else if (tag === "slider") buildSlider(ch[i], pageDom);
+    else if (tag === "switch") buildSwitch(ch[i], pageDom);
+  }
+}
+
+function normUnit(v) {
+  if (!v) return "";
+  if (v.indexOf("%") >= 0) return v;
+  if (/^\d+$/.test(v)) return v + "px";
+  return v;
+}
+
+function applyGeometry(el, xml) {
+  var x = xml.getAttribute("x"), y = xml.getAttribute("y");
+  var w = xml.getAttribute("w"), h = xml.getAttribute("h");
+  if (x) el.style.left = normUnit(x);
+  if (y) el.style.top = normUnit(y);
+  if (w) el.style.width = normUnit(w);
+  if (h) el.style.height = normUnit(h);
+  var r = xml.getAttribute("radius");
+  if (r) el.style.borderRadius = r + "px";
+  var al = xml.getAttribute("align");
+  if (al && !x) {
+    var parts = al.split(/\s+/);
+    if (parts[0] === "center") { el.style.left = "50%"; el.style.transform = "translateX(-50%)"; }
+    else if (parts[0] === "right") el.style.right = "0";
+    if (parts[1] === "center" && !y) {
+      el.style.top = "50%";
+      el.style.transform = (el.style.transform || "") + " translateY(-50%)";
+    }
+  }
+}
+
+function applyFont(el, xml) {
+  var f = xml.getAttribute("font");
+  if (f) el.style.fontSize = f + "px";
+}
+
+function applyColor(el, xml, attr, prop) {
+  var v = xml.getAttribute(attr);
+  if (!v) return;
+  if (v.charAt(0) === "{" && v.charAt(v.length - 1) === "}") {
+    var varName = v.substring(1, v.length - 1);
+    var fn = function() { var c = getState(varName); if (c) el.style[prop] = c; };
+    sub(varName, fn); fn();
+  } else { el.style[prop] = v; }
+}
+
+function applyVisible(el, xml) {
+  var v = xml.getAttribute("visible");
+  if (!v) return;
+  if (v.charAt(0) === "{" && v.charAt(v.length - 1) === "}") {
+    var varName = v.substring(1, v.length - 1);
+    var fn = function() {
+      var s = getState(varName);
+      el.classList.toggle("fc-hidden", s !== "true" && s !== "1");
+    };
+    sub(varName, fn); fn();
+  }
+}
+
+function applyText(el, xml) {
+  var raw = xml.textContent.trim();
+  if (!raw || raw === "X") return;
+  var vars = extractVars(raw);
+  if (vars.length > 0) {
+    var fn = function() { el.textContent = resolve(raw); };
+    for (var i = 0; i < vars.length; i++) sub(vars[i], fn);
+    fn();
+  } else { el.textContent = raw; }
+}
+
+function buildLabel(xml, parent) {
+  var el = document.createElement("div");
+  el.className = "fc-label";
+  var id = xml.getAttribute("id");
+  if (id) widgets[id] = el;
+  applyGeometry(el, xml); applyFont(el, xml);
+  applyColor(el, xml, "color", "color");
+  applyColor(el, xml, "bgcolor", "backgroundColor");
+  applyVisible(el, xml); applyText(el, xml);
+  parent.appendChild(el);
+}
+
+function buildButton(xml, parent) {
+  var el = document.createElement("div");
+  el.className = "fc-button";
+  var id = xml.getAttribute("id");
+  if (id) widgets[id] = el;
+  applyGeometry(el, xml); applyFont(el, xml);
+  applyColor(el, xml, "bgcolor", "backgroundColor");
+  applyColor(el, xml, "color", "color");
+  applyVisible(el, xml); applyText(el, xml);
+  
+  var oc = xml.getAttribute("onclick");
+  var hr = xml.getAttribute("href");
+  el.addEventListener("click", function() {
+    if (hr) {
+      showPage(hr.replace("/", ""));
+    } else if (oc) {
+      // Show what would be called, but don't execute
+      setStatus("onclick: " + oc + "() — Lua не выполняется", true);
+    }
+  });
+  parent.appendChild(el);
+}
+
+function buildInput(xml, parent) {
+  var el = document.createElement("input");
+  el.className = "fc-input";
+  el.type = xml.getAttribute("password") === "true" ? "password" : "text";
+  var id = xml.getAttribute("id");
+  if (id) widgets[id] = el;
+  applyGeometry(el, xml); applyVisible(el, xml);
+  var ph = xml.getAttribute("placeholder");
+  if (ph) el.placeholder = ph;
+  var bind = xml.getAttribute("bind");
+  if (bind) {
+    var fn = function() { if (document.activeElement !== el) el.value = getState(bind); };
+    sub(bind, fn); fn();
+    el.addEventListener("input", function() { setState(bind, el.value); });
+  }
+  parent.appendChild(el);
+}
+
+function buildSlider(xml, parent) {
+  var el = document.createElement("input");
+  el.className = "fc-slider"; el.type = "range";
+  var id = xml.getAttribute("id");
+  if (id) widgets[id] = el;
+  applyGeometry(el, xml); applyVisible(el, xml);
+  el.min = xml.getAttribute("min") || "0";
+  el.max = xml.getAttribute("max") || "100";
+  var bind = xml.getAttribute("bind");
+  if (bind) {
+    var fn = function() { el.value = getState(bind) || "0"; };
+    sub(bind, fn); fn();
+    el.addEventListener("input", function() { setState(bind, el.value); });
+  }
+  parent.appendChild(el);
+}
+
+function buildSwitch(xml, parent) {
+  var el = document.createElement("button");
+  el.className = "fc-switch";
+  var id = xml.getAttribute("id");
+  if (id) widgets[id] = el;
+  applyGeometry(el, xml);
+  if (!xml.getAttribute("w")) el.style.width = "50px";
+  if (!xml.getAttribute("h")) el.style.height = "26px";
+  var bind = xml.getAttribute("bind");
+  function render() {
+    var on = bind ? (getState(bind) === "true") : false;
+    el.style.background = on ? "#4caf50" : "#555";
+    el.style.borderRadius = "13px";
+    el.innerHTML = '<div style="width:22px;height:22px;background:#fff;border-radius:50%;position:absolute;top:2px;left:' + (on ? "26px" : "2px") + ';transition:left 0.15s"></div>';
+  }
+  if (bind) {
+    sub(bind, render); render();
+    el.addEventListener("click", function() {
+      setState(bind, getState(bind) === "true" ? "false" : "true");
+    });
+  }
+  applyVisible(el, xml);
+  parent.appendChild(el);
+}
+
+function showPage(pageId) {
+  var c = pageId.replace(/^\//, "");
+  var keys = Object.keys(pages);
+  for (var i = 0; i < keys.length; i++) pages[keys[i]].classList.remove("active");
+  if (pages[c]) { pages[c].classList.add("active"); currentPage = c; }
+}
+
+// Flutter Integration
+window.runAppSource = function(xmlStr) {
+  if (!xmlStr) return;
+  try {
+    buildApp(xmlStr);
+  } catch(e) {
+    setStatus("Error: " + e.message, true);
+  }
+};
+</script>
+</body>
+</html>
