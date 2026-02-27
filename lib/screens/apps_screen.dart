@@ -121,15 +121,18 @@ class _AppsScreenState extends State<AppsScreen> {
       _pullingApp = null;
       _pullingAction = null;
     });
-    if (code == null || !mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Не удалось загрузить приложение'),
-          backgroundColor: Color(0xFFEF4444),
-        ),
-      );
+    if (code == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Не удалось загрузить приложение'),
+            backgroundColor: Color(0xFFEF4444),
+          ),
+        );
+      }
       return;
     }
+    if (!mounted) return;
     
     // Открываем эмулятор
     Navigator.push(
@@ -181,24 +184,23 @@ class _AppsScreenState extends State<AppsScreen> {
 
     final content = await ble.pullFile(appName, file: targetFile);
 
-    if (mounted) setState(() {
+    if (!mounted) return;
+    setState(() {
       _pullingApp = null;
       _pullingAction = null;
     });
-    if (content == null || !mounted) return;
+    if (content == null) return;
 
-    if (mounted) {
-      Navigator.push(
-        context,
-        MaterialPageRoute(
-          builder: (_) => _EditorPage(
-            appName: appName,
-            initialContent: content,
-            isNew: false,
-          ),
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => _EditorPage(
+          appName: appName,
+          initialContent: content,
+          isNew: false,
         ),
-      );
-    }
+      ),
+    );
   }
 
   Future<void> _delete(String appName) async {
@@ -1093,7 +1095,7 @@ class _EditorPageState extends State<_EditorPage> with SingleTickerProviderState
   Future<void> _toggleListening() async {
     if (_isListening) {
       await _speech.stop();
-      setState(() => _isListening = false);
+      if (mounted) setState(() => _isListening = false);
       return;
     }
     
@@ -1121,6 +1123,7 @@ class _EditorPageState extends State<_EditorPage> with SingleTickerProviderState
       }
     }
     
+    if (!mounted) return;
     setState(() => _isListening = true);
     
     // Сохраняем текущий текст чтобы добавлять к нему
@@ -1272,6 +1275,7 @@ ${result.errorContext ?? 'нет данных'}
     // Автосохранение перед push
     await _saveLocal(silent: true);
 
+    if (!mounted) return;
     final ble = context.read<BleService>();
     final ok = await ble.pushFile(name, _appFileName(name), content);
 
@@ -1403,6 +1407,7 @@ ${result.errorContext ?? 'нет данных'}
     // Разворачиваем {filename} в содержимое файлов
     final expandedText = await _expandPromptResources(text);
     
+    if (!mounted) return;
     setState(() {
       // Для автофикса сообщение уже добавлено
       if (autoFixMessage == null) {

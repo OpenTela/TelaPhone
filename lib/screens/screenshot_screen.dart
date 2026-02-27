@@ -307,6 +307,7 @@ class _ScreenshotScreenState extends State<ScreenshotScreen> {
       );
       _pngBytes = byteData?.buffer.asUint8List();
 
+      if (!mounted) return;
       setState(() {
         _converting = false;
         _savedPath = null;
@@ -316,7 +317,7 @@ class _ScreenshotScreenState extends State<ScreenshotScreen> {
         _onFrameReceived(context.read<BleService>());
       }
     } catch (e) {
-      setState(() => _converting = false);
+      if (mounted) setState(() => _converting = false);
       debugPrint('Convert error: $e');
     }
   }
@@ -335,7 +336,7 @@ class _ScreenshotScreenState extends State<ScreenshotScreen> {
         text: 'Screenshot from FutureClock',
       );
 
-      setState(() => _savedPath = file.path);
+      if (mounted) setState(() => _savedPath = file.path);
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(

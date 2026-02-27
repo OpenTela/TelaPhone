@@ -28,6 +28,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Future<void> _loadSettings() async {
     final prefs = await SharedPreferences.getInstance();
+    if (!mounted) return;
     setState(() {
       _remoteDebug = prefs.getBool('remote_debug') ?? false;
     });
@@ -94,6 +95,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final ble = context.read<BleService>();
     setState(() => _scanning = true);
     final devices = await ble.scanDevices();
+    if (!mounted) return;
     setState(() {
       _devices = devices;
       _scanning = false;

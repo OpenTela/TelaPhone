@@ -347,6 +347,7 @@ class _EmulatorScreenState extends State<EmulatorScreen> {
     
     if (confirmed != true) return;
     
+    if (!mounted) return;
     setState(() => _deploying = true);
     
     try {
