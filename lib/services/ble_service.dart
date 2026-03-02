@@ -230,6 +230,12 @@ class BleService extends ChangeNotifier {
   int _watchBattery = 0;
   String _watchStatus = 'Нет данных';
   int _requestCount = 0;
+  
+  // === Device info (from sync) ===
+  String _deviceProtocol = '';
+  String _deviceOs = '';
+  String _deviceChip = '';
+  int _deviceUptime = 0;
 
   // === Screenshot ===
   bool screenshotInProgress = false;
@@ -331,6 +337,13 @@ class BleService extends ChangeNotifier {
   int get watchBattery => _watchBattery;
   String get watchStatus => _watchStatus;
   int get requestCount => _requestCount;
+  
+  // Device info getters
+  String get deviceProtocol => _deviceProtocol;
+  String get deviceOs => _deviceOs;
+  String get deviceChip => _deviceChip;
+  int get deviceUptime => _deviceUptime;
+  
   Map<String, Map<String, dynamic>> get servicesConfig =>
       Map.unmodifiable(_servicesConfig);
   int get screenshotWidth => _screenshotWidth;
@@ -687,6 +700,9 @@ class BleService extends ChangeNotifier {
       
       // Сохраняем для автоподключения
       _saveLastDevice(address, _deviceName);
+      
+      // Синхронизация протокола и времени
+      await sysSync();
       
       // Автозагрузка списка приложений
       _loadAppsInBackground();
@@ -1539,6 +1555,35 @@ class BleService extends ChangeNotifier {
       }
     } else {
       log('sys info failed: ${response?['msg'] ?? '?'}', level: LogLevel.error);
+    }
+    return response;
+  }
+
+  /// Синхронизация с устройством — отправляет протокол, время, timezone
+  /// Получает: protocol, os, chip, time, uptime
+  Future<Map<String, dynamic>?> sysSync({String? lang}) async {
+    final now = DateTime.now();
+    final datetime = now.toUtc().toIso8601String();
+    final tz = now.timeZoneOffset.inHours.toString();
+    
+    final args = ['2.7', datetime, tz];
+    if (lang != null) args.add(lang);
+    
+    final response = await sendCommand('sys', 'sync', args);
+    if (response?['status'] == 'ok') {
+      _deviceProtocol = response?['protocol']?.toString() ?? '';
+      _deviceOs = response?['os']?.toString() ?? '';
+      _deviceChip = response?['chip']?.toString() ?? '';
+      _deviceUptime = response?['uptime'] is int ? response!['uptime'] : 0;
+      
+      // Update watch status with OS version
+      _watchStatus = 'OS $_deviceOs';
+      
+      log('Sync OK: protocol=$_deviceProtocol, os=$_deviceOs', level: LogLevel.success);
+      log('  chip=$_deviceChip, uptime=${_deviceUptime}s', level: LogLevel.info);
+      notifyListeners();
+    } else {
+      log('sys sync failed: ${response?['msg'] ?? '?'}', level: LogLevel.error);
     }
     return response;
   }
