@@ -47,7 +47,7 @@ class BleAssistantApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'BLE Assistant',
+      title: 'TelaPhone',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         useMaterial3: true,

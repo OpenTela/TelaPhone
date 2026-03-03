@@ -733,7 +733,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            const Text('BLE Assistant',
+                            const Text('TelaPhone',
                                 style: TextStyle(
                                     color: Colors.white,
                                     fontWeight: FontWeight.w600)),

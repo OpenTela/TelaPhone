@@ -1882,7 +1882,9 @@ class BleService extends ChangeNotifier {
     final response = await sendCommand('app', 'info', [appName],
         timeout: const Duration(seconds: 5));
     if (response?['status'] == 'ok') {
-      log('$appName: ${response?['title']} (${response?['size']}b, ${(response?['files'] as List?)?.length ?? 0} files)',
+      final files = response?['files'];
+      final fileCount = files is Map ? files.length : (files is List ? files.length : 0);
+      log('$appName: ${response?['title']} (${response?['size']}b, $fileCount files)',
           level: LogLevel.success);
       return response;
     } else {

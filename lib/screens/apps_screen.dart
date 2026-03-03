@@ -84,6 +84,16 @@ class _AppsScreenState extends State<AppsScreen> {
     await ble.refreshApps();
   }
 
+  /// Извлекает список имён файлов из ответа (Map или List)
+  List<String> _parseFiles(dynamic files) {
+    if (files is Map) {
+      return files.keys.cast<String>().toList();
+    } else if (files is List) {
+      return files.cast<String>();
+    }
+    return [];
+  }
+
   /// Находит главный файл приложения по приоритету: .bax → .xml → .html
   String? _findMainFile(List<String> files) {
     // Приоритет расширений
@@ -111,8 +121,8 @@ class _AppsScreenState extends State<AppsScreen> {
     
     // Сначала получаем список файлов
     final info = await ble.appInfo(appName);
-    final files = (info?['files'] as List?)?.cast<String>() ?? ['app.html'];
-    final mainFile = _findMainFile(files) ?? 'app.html';
+    final files = _parseFiles(info?['files']);
+    final mainFile = _findMainFile(files.isNotEmpty ? files : ['app.html']) ?? 'app.html';
     
     // Загружаем код приложения
     final code = await ble.pullFile(appName, file: mainFile);
@@ -158,7 +168,7 @@ class _AppsScreenState extends State<AppsScreen> {
     String targetFile = file ?? 'app.html';
     if (file == null) {
       final info = await ble.appInfo(appName);
-      final files = (info?['files'] as List?)?.cast<String>() ?? [];
+      final files = _parseFiles(info?['files']);
       
       if (files.isNotEmpty) {
         final mainFile = _findMainFile(files);
@@ -473,7 +483,10 @@ class _AppCardState extends State<_AppCard> {
             final info = snapshot.data!;
             final title = info['title'] as String?;
             final size = info['size'] as int?;
-            final files = (info['files'] as List?)?.cast<String>() ?? [];
+            final filesRaw = info['files'];
+            final files = filesRaw is Map 
+                ? filesRaw.keys.cast<String>().toList() 
+                : (filesRaw is List ? filesRaw.cast<String>() : <String>[]);
             
             return Column(
               mainAxisSize: MainAxisSize.min,
