@@ -16,6 +16,9 @@ dependencies:
   flutter_blue_plus: ^1.31.0
   permission_handler: ^11.0.0
   
+  # Foreground service
+  flutter_foreground_task: ^8.17.0
+  
   # HTTP
   http: ^1.2.0
   socks5_proxy: ^1.0.4

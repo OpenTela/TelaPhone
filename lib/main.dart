@@ -5,15 +5,17 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 
 import 'services/ble_service.dart';
+import 'services/foreground_service.dart';
 import 'screens/home_screen.dart';
 import 'screens/commands_screen.dart';
 import 'screens/screenshot_screen.dart';
 import 'screens/settings_screen.dart';
 import 'screens/apps_screen.dart';
 
-void main() {
+void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   SystemChrome.setSystemUIOverlayStyle(
@@ -22,6 +24,9 @@ void main() {
       statusBarIconBrightness: Brightness.light,
     ),
   );
+  
+  // Инициализация foreground service
+  await BleBackgroundService.init();
 
   runApp(
     ChangeNotifierProvider(
@@ -37,6 +42,7 @@ Future<void> requestBlePermissions() async {
       Permission.bluetoothScan,
       Permission.bluetoothConnect,
       Permission.locationWhenInUse,
+      Permission.notification,
     ].request();
   }
 }
@@ -46,42 +52,44 @@ class BleAssistantApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'TelaPhone',
-      debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        useMaterial3: true,
-        brightness: Brightness.dark,
-        scaffoldBackgroundColor: const Color(0xFF0A0A0F),
-        colorScheme: ColorScheme.dark(
-          primary: const Color(0xFF6366F1),
-          secondary: const Color(0xFF22D3EE),
-          surface: const Color(0xFF12121A),
-          background: const Color(0xFF0A0A0F),
-          error: const Color(0xFFEF4444),
-        ),
-        textTheme: GoogleFonts.spaceGroteskTextTheme(
-          ThemeData.dark().textTheme,
-        ),
-        cardTheme: CardThemeData(
-          color: const Color(0xFF12121A),
-          elevation: 0,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(16),
-            side: BorderSide(
-              color: Colors.white.withOpacity(0.05),
+    return WithForegroundTask(
+      child: MaterialApp(
+        title: 'TelaPhone',
+        debugShowCheckedModeBanner: false,
+        theme: ThemeData(
+          useMaterial3: true,
+          brightness: Brightness.dark,
+          scaffoldBackgroundColor: const Color(0xFF0A0A0F),
+          colorScheme: ColorScheme.dark(
+            primary: const Color(0xFF6366F1),
+            secondary: const Color(0xFF22D3EE),
+            surface: const Color(0xFF12121A),
+            background: const Color(0xFF0A0A0F),
+            error: const Color(0xFFEF4444),
+          ),
+          textTheme: GoogleFonts.spaceGroteskTextTheme(
+            ThemeData.dark().textTheme,
+          ),
+          cardTheme: CardThemeData(
+            color: const Color(0xFF12121A),
+            elevation: 0,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(16),
+              side: BorderSide(
+                color: Colors.white.withOpacity(0.05),
+              ),
+            ),
+          ),
+          navigationBarTheme: NavigationBarThemeData(
+            backgroundColor: const Color(0xFF0A0A0F),
+            indicatorColor: const Color(0xFF6366F1).withOpacity(0.2),
+            labelTextStyle: WidgetStateProperty.all(
+              GoogleFonts.spaceGrotesk(fontSize: 12),
             ),
           ),
         ),
-        navigationBarTheme: NavigationBarThemeData(
-          backgroundColor: const Color(0xFF0A0A0F),
-          indicatorColor: const Color(0xFF6366F1).withOpacity(0.2),
-          labelTextStyle: WidgetStateProperty.all(
-            GoogleFonts.spaceGrotesk(fontSize: 12),
-          ),
-        ),
+        home: const MainNavigation(),
       ),
-      home: const MainNavigation(),
     );
   }
 }

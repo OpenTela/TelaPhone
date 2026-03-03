@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
+import 'foreground_service.dart';
 
 // UUIDs — должны совпадать с ESP32
 const String serviceUuid = "12345678-1234-5678-1234-56789abcdef0";
@@ -719,6 +720,13 @@ class BleService extends ChangeNotifier {
       // Синхронизация протокола и времени
       await sysSync();
       
+      // Запуск foreground service
+      await BleBackgroundService.start(
+        deviceName: _deviceName,
+        battery: _watchBattery,
+        requests: _requestCount,
+      );
+      
       // Автозагрузка списка приложений
       _loadAppsInBackground();
       
@@ -772,6 +780,9 @@ class BleService extends ChangeNotifier {
     
     notifyListeners();
     log('Соединение потеряно', level: LogLevel.warning);
+    
+    // Обновляем уведомление foreground service
+    BleBackgroundService.updateNotification(isConnected: false);
     
     // Автореконнект если не было ручного отключения
     if (!_manualDisconnect && lastAddress != null) {
@@ -1227,6 +1238,14 @@ class BleService extends ChangeNotifier {
       await sendToWatch(resp);
       _requestCount++;
       notifyListeners();
+      
+      // Обновляем уведомление
+      BleBackgroundService.updateNotification(
+        deviceName: _deviceName,
+        battery: _watchBattery,
+        requests: _requestCount,
+      );
+      
       log('→ ответ на часы: ${respJson.length}b', level: LogLevel.outgoing);
     } on TimeoutException {
       await _sendErrorResponse(msgId, 'timeout', 'HTTP таймаут', http: 408);
