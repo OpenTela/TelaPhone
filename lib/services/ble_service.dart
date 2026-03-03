@@ -236,6 +236,12 @@ class BleService extends ChangeNotifier {
   String _deviceOs = '';
   String _deviceChip = '';
   int _deviceUptime = 0;
+  
+  // === Time tracking ===
+  int _lastSyncEpoch = 0;  // epoch from last sync
+  DateTime? _lastSyncLocal;  // local time when sync happened
+  Timer? _timeUpdateTimer;
+  Timer? _periodicSyncTimer;
 
   // === Screenshot ===
   bool screenshotInProgress = false;
@@ -337,6 +343,15 @@ class BleService extends ChangeNotifier {
   int get watchBattery => _watchBattery;
   String get watchStatus => _watchStatus;
   int get requestCount => _requestCount;
+  
+  String get requestCountFormatted {
+    if (_requestCount >= 1000000) {
+      return '${(_requestCount / 1000000).toStringAsFixed(1)}M';
+    } else if (_requestCount >= 1000) {
+      return '${(_requestCount / 1000).toStringAsFixed(1)}k';
+    }
+    return _requestCount.toString();
+  }
   
   // Device info getters
   String get deviceProtocol => _deviceProtocol;
@@ -732,6 +747,8 @@ class BleService extends ChangeNotifier {
     _deviceName = null;
     _deviceAddress = null;
     _watchStatus = 'Нет данных';
+    _watchTime = '--:--';
+    _watchBattery = 0;
     _apps = [];
     _appsLoading = false;
     _pendingRequests.forEach((_, c) {
@@ -747,6 +764,11 @@ class BleService extends ChangeNotifier {
     _receivedBytes = 0;
     screenshotInProgress = false;
     _screenshotChunks.clear();
+    
+    // Stop timers and reset time tracking
+    _stopTimers();
+    _lastSyncEpoch = 0;
+    _lastSyncLocal = null;
     
     notifyListeners();
     log('Соединение потеряно', level: LogLevel.warning);
@@ -1563,8 +1585,11 @@ class BleService extends ChangeNotifier {
   /// Получает: protocol, os, chip, time, uptime
   Future<Map<String, dynamic>?> sysSync({String? lang}) async {
     final now = DateTime.now();
-    final datetime = now.toUtc().toIso8601String();
-    final tz = now.timeZoneOffset.inHours.toString();
+    final datetime = now.toUtc().toIso8601String();  // UTC время
+    final offset = now.timeZoneOffset;
+    final sign = offset.isNegative ? '-' : '+';
+    final tzHours = offset.inHours.abs();
+    final tz = '$sign$tzHours';
     
     final args = ['2.7', datetime, tz];
     if (lang != null) args.add(lang);
@@ -1576,16 +1601,71 @@ class BleService extends ChangeNotifier {
       _deviceChip = response?['chip']?.toString() ?? '';
       _deviceUptime = response?['uptime'] is int ? response!['uptime'] : 0;
       
+      // Battery
+      if (response?['battery'] != null) {
+        _watchBattery = response!['battery'] is int ? response['battery'] : 0;
+      }
+      
+      // Time (epoch → HH:MM) + save for local updates
+      if (response?['time'] != null) {
+        final epoch = response!['time'] is int ? response['time'] : 0;
+        if (epoch > 0) {
+          _lastSyncEpoch = epoch;
+          _lastSyncLocal = DateTime.now();
+          final dt = DateTime.fromMillisecondsSinceEpoch(epoch * 1000);
+          _watchTime = '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+        }
+      }
+      
       // Update watch status with OS version
       _watchStatus = 'OS $_deviceOs';
       
+      // Start timers
+      _startTimeUpdateTimer();
+      _startPeriodicSyncTimer();
+      
       log('Sync OK: protocol=$_deviceProtocol, os=$_deviceOs', level: LogLevel.success);
       log('  chip=$_deviceChip, uptime=${_deviceUptime}s', level: LogLevel.info);
+      log('  battery=$_watchBattery%, time=$_watchTime', level: LogLevel.info);
       notifyListeners();
     } else {
       log('sys sync failed: ${response?['msg'] ?? '?'}', level: LogLevel.error);
     }
     return response;
+  }
+  
+  void _startTimeUpdateTimer() {
+    _timeUpdateTimer?.cancel();
+    _timeUpdateTimer = Timer.periodic(const Duration(minutes: 1), (_) {
+      _updateLocalTime();
+    });
+  }
+  
+  void _updateLocalTime() {
+    if (_lastSyncEpoch == 0 || _lastSyncLocal == null) return;
+    
+    // Calculate current epoch based on time passed since last sync
+    final elapsed = DateTime.now().difference(_lastSyncLocal!);
+    final currentEpoch = _lastSyncEpoch + elapsed.inSeconds;
+    final dt = DateTime.fromMillisecondsSinceEpoch(currentEpoch * 1000);
+    _watchTime = '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+    notifyListeners();
+  }
+  
+  void _startPeriodicSyncTimer() {
+    _periodicSyncTimer?.cancel();
+    _periodicSyncTimer = Timer.periodic(const Duration(hours: 1), (_) {
+      if (isConnected) {
+        sysSync();
+      }
+    });
+  }
+  
+  void _stopTimers() {
+    _timeUpdateTimer?.cancel();
+    _timeUpdateTimer = null;
+    _periodicSyncTimer?.cancel();
+    _periodicSyncTimer = null;
   }
 
   String _fmtBytes(dynamic v) {

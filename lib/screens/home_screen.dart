@@ -104,7 +104,7 @@ class HomeScreen extends StatelessWidget {
                     _InfoTile(
                       icon: Icons.swap_vert,
                       label: 'Запросов',
-                      value: '${ble.requestCount}',
+                      value: ble.requestCountFormatted,
                       gradient: const [Color(0xFFF59E0B), Color(0xFFD97706)],
                     ),
                   ]),
@@ -384,7 +384,7 @@ class _InfoTile extends StatelessWidget {
         border: Border.all(color: Colors.white.withOpacity(0.05)),
       ),
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.center,
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
           Container(
@@ -401,7 +401,7 @@ class _InfoTile extends StatelessWidget {
             child: Icon(icon, color: Colors.white, size: 20),
           ),
           Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+            crossAxisAlignment: CrossAxisAlignment.center,
             children: [
               Text(
                 value,
@@ -411,6 +411,7 @@ class _InfoTile extends StatelessWidget {
                 ),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
+                textAlign: TextAlign.center,
               ),
               const SizedBox(height: 2),
               Text(
