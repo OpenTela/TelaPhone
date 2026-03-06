@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:provider/provider.dart';
@@ -443,9 +444,78 @@ class _EmulatorScreenState extends State<EmulatorScreen> {
     final urls = await _server.getServerUrls();
     if (!mounted) return;
     
-    // Показываем первый URL (или localhost) в title bar
-    final url = urls.isNotEmpty ? urls.first : 'localhost:8842';
-    _showStatus(url, const Color(0xFF3B82F6), seconds: 5);
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1A1A2E),
+        title: const Text('Сервер эмулятора', style: TextStyle(color: Colors.white)),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (urls.isEmpty) ...[
+              const Text(
+                'Сервер не запущен',
+                style: TextStyle(color: Colors.white70, fontSize: 13),
+              ),
+            ] else ...[
+              const Text(
+                'Откройте в браузере на ПК:',
+                style: TextStyle(color: Colors.white70, fontSize: 13),
+              ),
+              const SizedBox(height: 12),
+              ...urls.map((url) => Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: InkWell(
+                  onTap: () {
+                    Clipboard.setData(ClipboardData(text: url));
+                    ScaffoldMessenger.of(ctx).showSnackBar(
+                      const SnackBar(content: Text('URL скопирован'), duration: Duration(seconds: 1)),
+                    );
+                  },
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                    decoration: BoxDecoration(
+                      color: Colors.white.withOpacity(0.05),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: Colors.white.withOpacity(0.1)),
+                    ),
+                    child: Row(
+                      children: [
+                        const Icon(Icons.link, size: 16, color: Color(0xFF3B82F6)),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            url,
+                            style: const TextStyle(
+                              color: Color(0xFF3B82F6),
+                              fontSize: 14,
+                              fontFamily: 'monospace',
+                            ),
+                          ),
+                        ),
+                        const Icon(Icons.copy, size: 14, color: Colors.white38),
+                      ],
+                    ),
+                  ),
+                ),
+              )),
+              const SizedBox(height: 8),
+              Text(
+                'Нажмите чтобы скопировать',
+                style: TextStyle(color: Colors.white.withOpacity(0.4), fontSize: 11),
+              ),
+            ],
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Закрыть', style: TextStyle(color: Colors.white54)),
+          ),
+        ],
+      ),
+    );
   }
 
   Widget _buildBody() {
