@@ -5,7 +5,9 @@ import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:http/http.dart' as http;
+import 'package:http/io_client.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:socks5_proxy/socks_client.dart';
 import 'foreground_service.dart';
 
 // UUIDs — должны совпадать с ESP32
@@ -107,10 +109,20 @@ class BleService extends ChangeNotifier {
     'anthropic': {'enabled': false, 'apiKey': '', 'model': defaultModels['anthropic']},
   };
   
-  // Прокси для AI запросов (общий для всех провайдеров)
+  // Прокси настройки
   // Форматы: socks5://host:port, socks5://user:pass@host:port, http://host:port
-  String _aiProxy = '';
-  String get aiProxy => _aiProxy;
+  String _proxyUrl = '';
+  bool _proxyForAi = true;      // Использовать для AI API
+  bool _proxyForWeb = false;    // Использовать для веб-запросов от часов
+  
+  String get proxyUrl => _proxyUrl;
+  bool get proxyForAi => _proxyForAi;
+  bool get proxyForWeb => _proxyForWeb;
+  
+  /// Прокси для AI (если включён)
+  String get aiProxy => _proxyForAi ? _proxyUrl : '';
+  /// Прокси для веб-запросов (если включён)
+  String get webProxy => _proxyForWeb ? _proxyUrl : '';
   
   // Кэш моделей
   List<String>? _cachedOpenaiModels;
@@ -119,28 +131,40 @@ class BleService extends ChangeNotifier {
   Map<String, Map<String, dynamic>> get aiProviders => Map.unmodifiable(_aiProviders);
   
   /// Получить модели OpenAI (с кэшированием)
-  Future<List<String>> getOpenaiModels() async {
-    if (_cachedOpenaiModels != null) return _cachedOpenaiModels!;
+  Future<List<String>> getOpenaiModels({bool forceRefresh = false}) async {
+    if (_cachedOpenaiModels != null && !forceRefresh) return _cachedOpenaiModels!;
     
     final apiKey = _aiProviders['openai']?['apiKey'] as String?;
-    if (apiKey == null || apiKey.isEmpty) return fallbackModels['openai']!;
+    if (apiKey == null || apiKey.isEmpty) {
+      log('OpenAI: нет API ключа', level: LogLevel.warning);
+      return fallbackModels['openai']!;
+    }
+    
+    final client = _createHttpClient(aiProxy);
     
     try {
-      final response = await http.get(
+      log('OpenAI: загружаю модели...', level: LogLevel.info);
+      final response = await client.get(
         Uri.parse('https://api.openai.com/v1/models'),
         headers: {'Authorization': 'Bearer $apiKey'},
-      ).timeout(const Duration(seconds: 10));
+      ).timeout(const Duration(seconds: 15));
       
       if (response.statusCode == 200) {
         final data = json.decode(response.body);
-        final models = (data['data'] as List)
-            .map((m) => m['id'] as String)
-            // Whitelist: чат-модели
+        final allModels = (data['data'] as List).map((m) => m['id'] as String).toList();
+        log('OpenAI: получено ${allModels.length} моделей', level: LogLevel.info);
+        
+        final models = allModels
+            // Whitelist: только чат-модели gpt-4+, o1+
             .where((id) => 
-                id.startsWith('gpt-') ||
-                id.startsWith('chatgpt-') ||
+                id.startsWith('gpt-4') ||
+                id.startsWith('gpt-5') ||
+                id.startsWith('gpt-6') ||
+                id.startsWith('gpt-7') ||
+                id.startsWith('gpt-8') ||
+                id.startsWith('gpt-9') ||
                 RegExp(r'^o\d').hasMatch(id))  // o1, o3, o4...
-            // Blacklist: только точно не-чат
+            // Blacklist
             .where((id) => 
                 !id.contains('audio') &&
                 !id.contains('tts') &&
@@ -149,64 +173,124 @@ class BleService extends ChangeNotifier {
                 !id.contains('realtime') &&
                 !id.contains('moderation') &&
                 !id.contains('embedding') &&
-                !id.startsWith('gpt-image') &&      // image generation
-                !id.startsWith('chatimage') &&      // image generation
+                !id.contains('preview') &&        // preview версии
+                !id.contains('image') &&          // image generation
+                !id.contains('search') &&         // search-preview
+                !id.contains('deep-research') &&  // deep-research
                 !RegExp(r'-\d{4}-\d{2}-\d{2}$').hasMatch(id))  // dated snapshots
             .toList();
         
-        // Сортировка: по версии (универсальная)
+        log('OpenAI: после фильтрации ${models.length}', level: LogLevel.info);
+        
+        // Сортировка: по версии (от меньшей к большей)
         models.sort((a, b) {
-          // Извлекаем версию из имени модели
           double version(String m) {
-            // o4-mini -> 104, o3-pro -> 103 (o-модели выше gpt)
             final oMatch = RegExp(r'^o(\d+)').firstMatch(m);
             if (oMatch != null) return 100.0 + int.parse(oMatch.group(1)!);
             
-            // gpt-5.2-codex -> 5.2, gpt-4.1-nano -> 4.1
             final vMatch = RegExp(r'(\d+)\.(\d+)').firstMatch(m);
             if (vMatch != null) {
               return double.parse('${vMatch.group(1)}.${vMatch.group(2)}');
             }
             
-            // gpt-5 -> 5.0, gpt-4 -> 4.0
             final majorMatch = RegExp(r'gpt-(\d+)').firstMatch(m);
             if (majorMatch != null) return double.parse(majorMatch.group(1)!);
             
             return 0.0;
           }
           
-          // Сначала по версии (убывание), потом алфавитно
           final vA = version(a);
           final vB = version(b);
-          if (vA != vB) return vB.compareTo(vA);
+          if (vA != vB) return vA.compareTo(vB);
           return a.compareTo(b);
         });
         
         _cachedOpenaiModels = models.isNotEmpty ? models : fallbackModels['openai']!;
         log('OpenAI модели: ${_cachedOpenaiModels!.length}', level: LogLevel.success);
         return _cachedOpenaiModels!;
+      } else {
+        log('OpenAI API ошибка: ${response.statusCode}', level: LogLevel.error);
       }
     } catch (e) {
-      log('Не удалось загрузить OpenAI модели: $e', level: LogLevel.warning);
+      log('OpenAI исключение: $e', level: LogLevel.error);
+    } finally {
+      client.close();
     }
     return fallbackModels['openai']!;
   }
   
-  /// Получить модели Anthropic (с кэшированием)
-  Future<List<String>> getAnthropicModels() async {
-    if (_cachedAnthropicModels != null) return _cachedAnthropicModels!;
-    
-    final apiKey = _aiProviders['anthropic']?['apiKey'] as String?;
-    if (apiKey == null || apiKey.isEmpty) return fallbackModels['anthropic']!;
+  /// Создать HTTP клиент с прокси
+  http.Client _createHttpClient(String proxy) {
+    if (proxy.isEmpty) {
+      return http.Client();
+    }
     
     try {
-      final response = await http.get(
+      final uri = Uri.parse(proxy);
+      final scheme = uri.scheme.toLowerCase();
+      
+      if (scheme == 'socks5' || scheme == 'socks') {
+        final host = uri.host;
+        final port = uri.port != 0 ? uri.port : 1080;
+        final client = HttpClient();
+        
+        if (uri.userInfo.isNotEmpty) {
+          final parts = uri.userInfo.split(':');
+          SocksTCPClient.assignToHttpClient(client, [
+            ProxySettings(
+              InternetAddress(host),
+              port,
+              username: parts[0],
+              password: parts.length > 1 ? parts[1] : '',
+            ),
+          ]);
+        } else {
+          SocksTCPClient.assignToHttpClient(client, [
+            ProxySettings(InternetAddress(host), port),
+          ]);
+        }
+        return IOClient(client);
+      } else if (scheme == 'http' || scheme == 'https') {
+        final client = HttpClient();
+        client.findProxy = (url) => 'PROXY ${uri.host}:${uri.port}';
+        if (uri.userInfo.isNotEmpty) {
+          final parts = uri.userInfo.split(':');
+          client.addProxyCredentials(
+            uri.host,
+            uri.port,
+            'Basic',
+            HttpClientBasicCredentials(parts[0], parts.length > 1 ? parts[1] : ''),
+          );
+        }
+        return IOClient(client);
+      }
+    } catch (e) {
+      debugPrint('Ошибка прокси: $e');
+    }
+    return http.Client();
+  }
+  
+  /// Получить модели Anthropic (с кэшированием)
+  Future<List<String>> getAnthropicModels({bool forceRefresh = false}) async {
+    if (_cachedAnthropicModels != null && !forceRefresh) return _cachedAnthropicModels!;
+    
+    final apiKey = _aiProviders['anthropic']?['apiKey'] as String?;
+    if (apiKey == null || apiKey.isEmpty) {
+      log('Anthropic: нет API ключа', level: LogLevel.warning);
+      return fallbackModels['anthropic']!;
+    }
+    
+    final client = _createHttpClient(aiProxy);
+    
+    try {
+      log('Anthropic: загружаю модели...', level: LogLevel.info);
+      final response = await client.get(
         Uri.parse('https://api.anthropic.com/v1/models'),
         headers: {
           'x-api-key': apiKey,
           'anthropic-version': '2023-06-01',
         },
-      ).timeout(const Duration(seconds: 5));
+      ).timeout(const Duration(seconds: 15));
       
       if (response.statusCode == 200) {
         final data = json.decode(response.body);
@@ -214,6 +298,8 @@ class BleService extends ChangeNotifier {
             .map((m) => m['id'] as String)
             .where((id) => id.startsWith('claude-'))
             .toList();
+        
+        log('Anthropic: получено ${models.length} моделей', level: LogLevel.info);
         
         // Сортировка по мощности: haiku < sonnet < opus
         int modelRank(String m) {
@@ -227,9 +313,13 @@ class BleService extends ChangeNotifier {
         _cachedAnthropicModels = models.isNotEmpty ? models : fallbackModels['anthropic']!;
         log('Anthropic модели: ${_cachedAnthropicModels!.length}', level: LogLevel.success);
         return _cachedAnthropicModels!;
+      } else {
+        log('Anthropic API ошибка: ${response.statusCode}', level: LogLevel.error);
       }
     } catch (e) {
-      log('Не удалось загрузить Anthropic модели: $e', level: LogLevel.warning);
+      log('Anthropic исключение: $e', level: LogLevel.error);
+    } finally {
+      client.close();
     }
     return fallbackModels['anthropic']!;
   }
@@ -473,7 +563,9 @@ class BleService extends ChangeNotifier {
       }
       
       // Загружаем прокси
-      _aiProxy = prefs.getString('ai_proxy') ?? '';
+      _proxyUrl = prefs.getString('proxy_url') ?? '';
+      _proxyForAi = prefs.getBool('proxy_for_ai') ?? true;
+      _proxyForWeb = prefs.getBool('proxy_for_web') ?? false;
     } catch (e) {
       debugPrint('Ошибка загрузки AI providers: $e');
     }
@@ -484,10 +576,20 @@ class BleService extends ChangeNotifier {
     await prefs.setString('ai_providers', json.encode(_aiProviders));
   }
   
-  Future<void> setAiProxy(String proxy) async {
-    _aiProxy = proxy;
+  Future<void> setProxy({String? url, bool? forAi, bool? forWeb}) async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('ai_proxy', proxy);
+    if (url != null) {
+      _proxyUrl = url;
+      await prefs.setString('proxy_url', url);
+    }
+    if (forAi != null) {
+      _proxyForAi = forAi;
+      await prefs.setBool('proxy_for_ai', forAi);
+    }
+    if (forWeb != null) {
+      _proxyForWeb = forWeb;
+      await prefs.setBool('proxy_for_web', forWeb);
+    }
     notifyListeners();
   }
 

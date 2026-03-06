@@ -1,61 +1,79 @@
-<app>
-  <system>
-    <bluetooth/>
-  </system>
-  
+<app version="1.0" os="1.0">
+  <config>
+    <network/>
+  </config>
+
   <ui default="/main">
     <page id="main">
-      <label align="center" y="5%" font="16" color="#888">{city}</label>
-      <label align="center" y="20%" font="72" color="#fff">{temp}°</label>
-      <label align="center" y="45%" font="24" color="#aaa">{desc}</label>
-      
-      <label x="15%" y="60%" color="#888">💧 {humidity}%</label>
-      <label x="55%" y="60%" color="#888">💨 {wind} м/с</label>
-      
-      <button align="center" y="80%" w="60%" h="40" bgcolor="#3b82f6" onclick="refresh">
-        🔄 Обновить
-      </button>
-      
-      <label align="center" y="92%" font="16" color="#444">{updated}</label>
+      <label class="title" align="center" y="5%">Weather</label>
+
+      <label class="status" align="center" y="15%">{bleStatus}</label>
+
+      <label class="temp" align="center" y="35%">{temperature}</label>
+      <label class="desc" align="center" y="55%">{description}</label>
+      <label class="city" align="center" y="70%">{city}</label>
+
+      <button class="btn" x="10%" y="82%" onclick="refresh" w="35%" h="40">Refresh</button>
+      <button class="btn-back" x="55%" y="82%" onclick="goHome" w="35%" h="40">Home</button>
     </page>
   </ui>
-  
+
   <state>
-    <string name="city" default="Москва"/>
-    <string name="temp" default="--"/>
-    <string name="desc" default="Загрузка..."/>
-    <string name="humidity" default="--"/>
-    <string name="wind" default="--"/>
-    <string name="updated" default=""/>
+    <string name="bleStatus" default="Checking BLE..."/>
+    <string name="temperature" default="--°C"/>
+    <string name="description" default=""/>
+    <string name="city" default="Moscow"/>
   </state>
-  
+
+  <timer interval="5000" call="checkBLE"/>
+
   <script language="lua">
+    local CITY = "Moscow"
+
+    function checkBLE()
+      if net.connected() then
+        state.bleStatus = "BLE: OK"
+      else
+        state.bleStatus = "BLE: ..."
+      end
+    end
+
     function refresh()
-      state.desc = "Загрузка..."
-      
-      fetch({
-        url = "https://api.openweathermap.org/data/2.5/weather",
-        params = {
-          q = "Moscow",
-          units = "metric",
-          lang = "ru"
-        },
-        authorize = true  -- appid из конфига
+      if not net.connected() then
+        state.description = "No BLE!"
+        return
+      end
+
+      state.description = "Loading..."
+
+      net.fetch({
+        url = "https://api.openweathermap.org/data/2.5/weather?q=" .. CITY,
+        authorize = true,
+        format = "json",
+        fields = {"main.temp", "weather[0].description"}
       }, function(resp)
         if resp.status == 200 then
-          local data = json.parse(resp.body)
-          state.temp = math.floor(data.main.temp)
-          state.desc = data.weather[1].description
-          state.humidity = data.main.humidity
-          state.wind = data.wind.speed
-          state.updated = os.date("%H:%M")
+          local body = resp.body
+          state.temperature = math.floor(body["main.temp"]) .. "°C"
+          state.description = body["weather[0].description"]
         else
-          state.desc = "Ошибка: " .. resp.status
+          state.description = resp.error or ("Error " .. resp.status)
         end
       end)
     end
-    
-    -- Загрузка при старте
-    refresh()
+
+    function goHome()
+      exit()
+    end
   </script>
+
+  <style>
+    .title { color: #ffffff; font-size: 32px; }
+    .status { color: #888888; font-size: 16px; }
+    .temp { color: #ffcc00; font-size: 72px; }
+    .desc { color: #aaaaaa; font-size: 32px; }
+    .city { color: #666666; font-size: 16px; }
+    .btn { background: #2196F3; color: #ffffff; border-radius: 8px; }
+    .btn-back { background: #555555; color: #ffffff; border-radius: 8px; }
+  </style>
 </app>

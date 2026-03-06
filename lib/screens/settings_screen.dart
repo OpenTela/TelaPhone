@@ -514,8 +514,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
               // Прокси для AI
               const SizedBox(height: 12),
               _ProxyField(
-                proxy: ble.aiProxy,
-                onChanged: (proxy) => ble.setAiProxy(proxy),
+                proxyUrl: ble.proxyUrl,
+                proxyForAi: ble.proxyForAi,
+                proxyForWeb: ble.proxyForWeb,
+                onChanged: ({String? url, bool? forAi, bool? forWeb}) {
+                  ble.setProxy(url: url, forAi: forAi, forWeb: forWeb);
+                },
               ),
 
               const SizedBox(height: 24),
@@ -1125,11 +1129,15 @@ class _AiProvidersSectionState extends State<_AiProvidersSection> {
 
 // === Proxy Field ===
 class _ProxyField extends StatefulWidget {
-  final String proxy;
-  final void Function(String) onChanged;
+  final String proxyUrl;
+  final bool proxyForAi;
+  final bool proxyForWeb;
+  final void Function({String? url, bool? forAi, bool? forWeb}) onChanged;
 
   const _ProxyField({
-    required this.proxy,
+    required this.proxyUrl,
+    required this.proxyForAi,
+    required this.proxyForWeb,
     required this.onChanged,
   });
 
@@ -1144,14 +1152,14 @@ class _ProxyFieldState extends State<_ProxyField> {
   @override
   void initState() {
     super.initState();
-    _controller = TextEditingController(text: widget.proxy);
+    _controller = TextEditingController(text: widget.proxyUrl);
   }
 
   @override
   void didUpdateWidget(_ProxyField oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.proxy != widget.proxy && _controller.text != widget.proxy) {
-      _controller.text = widget.proxy;
+    if (oldWidget.proxyUrl != widget.proxyUrl && _controller.text != widget.proxyUrl) {
+      _controller.text = widget.proxyUrl;
     }
   }
 
@@ -1163,7 +1171,8 @@ class _ProxyFieldState extends State<_ProxyField> {
 
   @override
   Widget build(BuildContext context) {
-    final hasProxy = widget.proxy.isNotEmpty;
+    final hasProxy = widget.proxyUrl.isNotEmpty;
+    final isActive = hasProxy && (widget.proxyForAi || widget.proxyForWeb);
     
     return Container(
       decoration: BoxDecoration(
@@ -1177,7 +1186,7 @@ class _ProxyFieldState extends State<_ProxyField> {
             dense: true,
             leading: Icon(
               Icons.vpn_key_outlined,
-              color: hasProxy ? const Color(0xFF22C55E) : Colors.white24,
+              color: isActive ? const Color(0xFF22C55E) : Colors.white24,
               size: 20,
             ),
             title: Text(
@@ -1188,9 +1197,9 @@ class _ProxyFieldState extends State<_ProxyField> {
               ),
             ),
             subtitle: Text(
-              hasProxy ? _formatProxy(widget.proxy) : 'Не настроен',
+              hasProxy ? _formatProxy(widget.proxyUrl) : 'Не настроен',
               style: TextStyle(
-                color: hasProxy ? const Color(0xFF22C55E).withOpacity(0.7) : Colors.white24,
+                color: isActive ? const Color(0xFF22C55E).withOpacity(0.7) : Colors.white24,
                 fontSize: 11,
               ),
             ),
@@ -1235,16 +1244,42 @@ class _ProxyFieldState extends State<_ProxyField> {
                               color: Colors.white24,
                               onPressed: () {
                                 _controller.clear();
-                                widget.onChanged('');
+                                widget.onChanged(url: '');
                               },
                             )
                           : null,
                     ),
-                    onChanged: widget.onChanged,
+                    onChanged: (v) => widget.onChanged(url: v),
                   ),
+                  const SizedBox(height: 12),
+                  
+                  // Чекбоксы для выбора где использовать
+                  Text(
+                    'Использовать для:',
+                    style: TextStyle(color: Colors.white.withOpacity(0.4), fontSize: 11),
+                  ),
+                  const SizedBox(height: 4),
+                  Row(
+                    children: [
+                      _buildCheckbox(
+                        'ИИ агенты',
+                        widget.proxyForAi,
+                        (v) => widget.onChanged(forAi: v),
+                        enabled: hasProxy,
+                      ),
+                      const SizedBox(width: 16),
+                      _buildCheckbox(
+                        'Веб сервисы',
+                        widget.proxyForWeb,
+                        (v) => widget.onChanged(forWeb: v),
+                        enabled: hasProxy,
+                      ),
+                    ],
+                  ),
+                  
                   const SizedBox(height: 8),
                   Text(
-                    'Форматы: socks5://host:port, http://host:port, socks5://user:pass@host:port',
+                    'Форматы: socks5://host:port, http://host:port',
                     style: TextStyle(color: Colors.white.withOpacity(0.2), fontSize: 10),
                   ),
                 ],
@@ -1255,30 +1290,61 @@ class _ProxyFieldState extends State<_ProxyField> {
     );
   }
   
+  Widget _buildCheckbox(String label, bool value, void Function(bool) onChanged, {bool enabled = true}) {
+    return InkWell(
+      onTap: enabled ? () => onChanged(!value) : null,
+      borderRadius: BorderRadius.circular(6),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 2),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            SizedBox(
+              width: 18,
+              height: 18,
+              child: Checkbox(
+                value: value,
+                onChanged: enabled ? (v) => onChanged(v ?? false) : null,
+                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                visualDensity: VisualDensity.compact,
+                activeColor: const Color(0xFF3B82F6),
+                side: BorderSide(
+                  color: enabled ? Colors.white38 : Colors.white12,
+                ),
+              ),
+            ),
+            const SizedBox(width: 6),
+            Text(
+              label,
+              style: TextStyle(
+                color: enabled ? Colors.white54 : Colors.white24,
+                fontSize: 12,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+  
   String _formatProxy(String proxy) {
-    // Парсим прокси для маскировки
-    // socks5://user:pass@192.168.1.100:1080 → socks5://**:**@**.**.1.100:1080
     try {
       final uri = Uri.parse(proxy);
-      final scheme = uri.scheme; // socks5, http
+      final scheme = uri.scheme;
       final host = uri.host;
       final port = uri.port;
       
-      // Маскируем хост (первые два октета)
       String maskedHost = host;
       if (host.contains('.')) {
         final parts = host.split('.');
         if (parts.length == 4) {
-          // 192.168.1.100 → **.**.1.100
           maskedHost = '**.**.${parts[2]}.${parts[3]}';
         } else if (parts.length >= 2) {
-          // domain.example.com → **.example.com
           parts[0] = '**';
           maskedHost = parts.join('.');
         }
       }
       
-      // Если есть credentials
       if (uri.userInfo.isNotEmpty) {
         return '$scheme://**:**@$maskedHost:$port';
       }

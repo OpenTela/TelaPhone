@@ -248,7 +248,7 @@ class _AppsScreenState extends State<AppsScreen> {
       MaterialPageRoute(
         builder: (_) => const _EditorPage(
           appName: '',
-          initialContent: '''<app>
+          initialContent: '''<app version="1.0" os="1.0" title="example">
   <ui default="/main">
     <page id="main">
       <label align="center" y="35%" color="#fff" font="32">{text}</label>
@@ -270,18 +270,6 @@ class _AppsScreenState extends State<AppsScreen> {
   <script language="lua">
     function start()
       state.text = string.reverse(state.text)
-      
-      -- UPPERCASE
-      -- state.text = string.upper(state.text)
-      
-      -- lowercase  
-      -- state.text = string.lower(state.text)
-      
-      -- first 5 chars
-      -- state.text = string.sub(state.text, 1, 5)
-      
-      -- length
-      -- state.text = string.len(state.text)
     end
     
     function reset()
@@ -1010,9 +998,13 @@ class _EditorPageState extends State<_EditorPage> with SingleTickerProviderState
   final List<_ChatMessage> _messages = [];
   final TextEditingController _chatController = TextEditingController();
   bool _chatLoading = false;
+  bool _chatCancelled = false;  // Флаг отмены запроса
   String _loadingPhrase = '';
   Timer? _longWaitTimer;
   Timer? _warmupTimer;
+  
+  // Свёрнутые блоки кода: "msgIndex:blockIndex" -> collapsed
+  final Set<String> _collapsedCodeBlocks = {};
   
   // Pending code from AI (for popup)
   String? _pendingCode;
@@ -1105,6 +1097,19 @@ class _EditorPageState extends State<_EditorPage> with SingleTickerProviderState
     return result ?? false;
   }
 
+  /// Отмена текущего AI запроса
+  void _cancelChat() {
+    if (!_chatLoading) return;
+    setState(() {
+      _chatCancelled = true;
+      _chatLoading = false;
+      _loadingPhrase = '';
+    });
+    _longWaitTimer?.cancel();
+    _warmupTimer?.cancel();
+    _showNotification('Запрос отменён');
+  }
+
   Future<void> _toggleListening() async {
     if (_isListening) {
       await _speech.stop();
@@ -1153,6 +1158,10 @@ class _EditorPageState extends State<_EditorPage> with SingleTickerProviderState
           _chatController.selection = TextSelection.fromPosition(
             TextPosition(offset: _chatController.text.length),
           );
+          // Когда распознавание завершено - сбрасываем флаг
+          if (result.finalResult) {
+            _isListening = false;
+          }
         });
       },
       localeId: 'ru_RU',
@@ -1428,6 +1437,7 @@ ${result.errorContext ?? 'нет данных'}
         _chatController.clear();
       }
       _chatLoading = true;
+      _chatCancelled = false;  // Сброс флага отмены
       _loadingPhrase = '...';  // Сначала просто точки
     });
     
@@ -1470,32 +1480,46 @@ ${result.errorContext ?? 'нет данных'}
       final currentCode = _contentController.text;
       final appName = _nameController.text.trim();
       
+      // Проверяем, это НЕизменённый example-шаблон
+      final isUnmodifiedExample = widget.isNew && 
+          currentCode == _initialContent && 
+          currentCode.contains('title="example"');
+      
       // Загружаем промпты из файлов
       String systemPrompt;
       try {
         final system = await rootBundle.loadString('assets/prompts/system.md');
-        final docs = await rootBundle.loadString('assets/prompts/documentation.md');
-        systemPrompt = '$system\n\n$docs';
+        final rules = await rootBundle.loadString('assets/prompts/rules.md');
+        
+        // Загружаем примеры
+        final examples = StringBuffer();
+        for (final name in ['calc.xml', 'counter.xml', 'timer.xml', 'weather.xml']) {
+          try {
+            final content = await rootBundle.loadString('assets/prompts/$name');
+            examples.writeln('\n### Пример: $name\n```xml\n$content\n```');
+          } catch (_) {}
+        }
+        
+        systemPrompt = '$system\n\n$rules\n\n## ПРИМЕРЫ\n${examples.toString()}';
       } catch (e) {
-        systemPrompt = 'Ты помогаешь создавать приложения. Код: <app os="1.0" title="Name">...</app>';
+        systemPrompt = 'Ты помогаешь создавать приложения. Код: <app version="1.0" os="1.0">...</app>';
       }
       
-      // Добавляем контекст
+      // Добавляем контекст (только если не неизменённый example)
       final context = StringBuffer();
-      context.writeln('\n## КОНТЕКСТ');
-      context.writeln(currentCode.isEmpty 
-          ? 'Задача: создать новое приложение по описанию.' 
-          : 'Задача: модифицировать существующий код.');
-      
-      // Если пользователь задал имя — требуем использовать его как title
-      if (appName.isNotEmpty && _nameManuallyEdited) {
-        context.writeln('ВАЖНО: title="$appName" (имя задано пользователем, не менять!)');
-      } else if (appName.isNotEmpty) {
-        context.writeln('Имя: $appName');
-      }
-      
-      if (currentCode.isNotEmpty) {
+      if (!isUnmodifiedExample && currentCode.isNotEmpty) {
+        context.writeln('\n## КОНТЕКСТ');
+        context.writeln('Задача: модифицировать существующий код.');
+        
+        // Если пользователь задал имя — требуем использовать его как title
+        if (appName.isNotEmpty && _nameManuallyEdited) {
+          context.writeln('ВАЖНО: title="$appName" (имя задано пользователем, не менять!)');
+        }
+        
         context.writeln('\nТЕКУЩИЙ КОД:\n$currentCode');
+      } else if (appName.isNotEmpty && _nameManuallyEdited) {
+        context.writeln('\n## КОНТЕКСТ');
+        context.writeln('ВАЖНО: title="$appName" (имя задано пользователем!)');
       }
       systemPrompt = '$systemPrompt${context.toString()}';
 
@@ -1509,7 +1533,7 @@ ${result.errorContext ?? 'нет данных'}
 
       final response = await _callAiApi(provider, systemPrompt, messagesForAi);
       
-      if (mounted) {
+      if (mounted && !_chatCancelled) {
         _longWaitTimer?.cancel();
         _warmupTimer?.cancel();
         setState(() {
@@ -1522,15 +1546,19 @@ ${result.errorContext ?? 'нет данных'}
         if (extractedCode != null) {
           _extractAndOfferCode(response);
         }
+      } else if (mounted) {
+        setState(() => _chatLoading = false);
       }
     } catch (e) {
-      if (mounted) {
+      if (mounted && !_chatCancelled) {
         _longWaitTimer?.cancel();
         _warmupTimer?.cancel();
         setState(() {
           _messages.add(_ChatMessage(role: 'assistant', content: 'Ошибка: $e'));
           _chatLoading = false;
         });
+      } else if (mounted) {
+        setState(() => _chatLoading = false);
       }
     }
   }
@@ -1578,34 +1606,86 @@ ${result.errorContext ?? 'нет данных'}
     
     try {
       if (providerName == 'openai') {
-        final response = await client.post(
-          Uri.parse('https://api.openai.com/v1/chat/completions'),
-          headers: {
-            'Authorization': 'Bearer $apiKey',
-            'Content-Type': 'application/json',
-          },
-          body: jsonEncode({
-            'model': model,
-            'messages': [
-              {'role': 'system', 'content': system},
-              ...messages.map((m) => {'role': m.role, 'content': m.content}),
-            ],
-            'max_completion_tokens': 32768,
-          }),
-        );
+        // Codex модели используют Responses API, остальные — Chat Completions
+        final useResponsesApi = model.contains('codex');
         
-        if (response.statusCode == 200) {
-          final data = jsonDecode(response.body);
-          return data['choices'][0]['message']['content'] as String;
-        } else {
-          String errorMsg = 'OpenAI ${response.statusCode}';
-          try {
-            final body = jsonDecode(response.body);
-            if (body['error'] != null && body['error']['message'] != null) {
-              errorMsg = body['error']['message'];
+        if (useResponsesApi) {
+          // Responses API для codex
+          final response = await client.post(
+            Uri.parse('https://api.openai.com/v1/responses'),
+            headers: {
+              'Authorization': 'Bearer $apiKey',
+              'Content-Type': 'application/json',
+            },
+            body: jsonEncode({
+              'model': model,
+              'instructions': system,
+              'input': messages.map((m) => 
+                {'role': m.role, 'content': m.content}
+              ).toList(),
+            }),
+          );
+          
+          if (response.statusCode == 200) {
+            final data = jsonDecode(response.body);
+            // Responses API возвращает output массив
+            final output = data['output'] as List;
+            for (final item in output) {
+              if (item['type'] == 'message') {
+                final content = item['content'] as List;
+                for (final c in content) {
+                  if (c['type'] == 'output_text' || c['type'] == 'text') {
+                    return c['text'] as String;
+                  }
+                }
+              }
             }
-          } catch (_) {}
-          throw Exception(errorMsg);
+            // Fallback: output_text на верхнем уровне
+            if (data['output_text'] != null) {
+              return data['output_text'] as String;
+            }
+            throw Exception('Не удалось извлечь ответ из Responses API');
+          } else {
+            String errorMsg = 'OpenAI ${response.statusCode}';
+            try {
+              final body = jsonDecode(response.body);
+              if (body['error'] != null && body['error']['message'] != null) {
+                errorMsg = body['error']['message'];
+              }
+            } catch (_) {}
+            throw Exception(errorMsg);
+          }
+        } else {
+          // Chat Completions API для обычных моделей
+          final response = await client.post(
+            Uri.parse('https://api.openai.com/v1/chat/completions'),
+            headers: {
+              'Authorization': 'Bearer $apiKey',
+              'Content-Type': 'application/json',
+            },
+            body: jsonEncode({
+              'model': model,
+              'messages': [
+                {'role': 'system', 'content': system},
+                ...messages.map((m) => {'role': m.role, 'content': m.content}),
+              ],
+              'max_completion_tokens': 32768,
+            }),
+          );
+          
+          if (response.statusCode == 200) {
+            final data = jsonDecode(response.body);
+            return data['choices'][0]['message']['content'] as String;
+          } else {
+            String errorMsg = 'OpenAI ${response.statusCode}';
+            try {
+              final body = jsonDecode(response.body);
+              if (body['error'] != null && body['error']['message'] != null) {
+                errorMsg = body['error']['message'];
+              }
+            } catch (_) {}
+            throw Exception(errorMsg);
+          }
         }
       } else if (providerName == 'anthropic') {
         final response = await client.post(
@@ -2356,6 +2436,153 @@ ${result.errorContext ?? 'нет данных'}
     );
   }
   
+  /// Строит содержимое сообщения с collapsible блоками кода
+  Widget _buildMessageContent(String content, int msgIndex) {
+    // Парсим блоки кода
+    final codeBlockRegex = RegExp(r'```(\w*)\n([\s\S]*?)```', multiLine: true);
+    final matches = codeBlockRegex.allMatches(content).toList();
+    
+    if (matches.isEmpty) {
+      // Нет блоков кода — просто текст
+      return SelectableText(
+        content,
+        style: TextStyle(
+          color: Colors.white.withOpacity(0.8),
+          fontSize: 13,
+          height: 1.4,
+        ),
+      );
+    }
+    
+    // Разбиваем на части: текст и код
+    final widgets = <Widget>[];
+    int lastEnd = 0;
+    int blockIndex = 0;
+    
+    for (final match in matches) {
+      // Текст перед блоком кода
+      if (match.start > lastEnd) {
+        final textBefore = content.substring(lastEnd, match.start).trim();
+        if (textBefore.isNotEmpty) {
+          widgets.add(SelectableText(
+            textBefore,
+            style: TextStyle(
+              color: Colors.white.withOpacity(0.8),
+              fontSize: 13,
+              height: 1.4,
+            ),
+          ));
+          widgets.add(const SizedBox(height: 8));
+        }
+      }
+      
+      // Блок кода
+      final lang = match.group(1) ?? '';
+      final code = match.group(2) ?? '';
+      final blockKey = '$msgIndex:$blockIndex';
+      final isCollapsed = _collapsedCodeBlocks.contains(blockKey);
+      final lines = code.trim().split('\n').length;
+      
+      widgets.add(Container(
+        margin: const EdgeInsets.symmetric(vertical: 4),
+        decoration: BoxDecoration(
+          color: Colors.black.withOpacity(0.3),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: Colors.white.withOpacity(0.1)),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Header
+            InkWell(
+              onTap: () {
+                setState(() {
+                  if (isCollapsed) {
+                    _collapsedCodeBlocks.remove(blockKey);
+                  } else {
+                    _collapsedCodeBlocks.add(blockKey);
+                  }
+                });
+              },
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                decoration: BoxDecoration(
+                  color: Colors.white.withOpacity(0.05),
+                  borderRadius: const BorderRadius.vertical(top: Radius.circular(8)),
+                ),
+                child: Row(
+                  children: [
+                    Icon(
+                      isCollapsed ? Icons.chevron_right : Icons.expand_more,
+                      size: 16,
+                      color: Colors.white38,
+                    ),
+                    const SizedBox(width: 4),
+                    Text(
+                      lang.isNotEmpty ? lang : 'code',
+                      style: TextStyle(
+                        color: Colors.white.withOpacity(0.5),
+                        fontSize: 11,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                    const Spacer(),
+                    Text(
+                      '$lines lines',
+                      style: TextStyle(
+                        color: Colors.white.withOpacity(0.3),
+                        fontSize: 10,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            // Code content
+            if (!isCollapsed)
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(10),
+                child: SelectableText(
+                  code.trim(),
+                  style: TextStyle(
+                    color: Colors.white.withOpacity(0.75),
+                    fontSize: 12,
+                    fontFamily: 'monospace',
+                    height: 1.4,
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ));
+      
+      lastEnd = match.end;
+      blockIndex++;
+    }
+    
+    // Текст после последнего блока кода
+    if (lastEnd < content.length) {
+      final textAfter = content.substring(lastEnd).trim();
+      if (textAfter.isNotEmpty) {
+        widgets.add(const SizedBox(height: 8));
+        widgets.add(SelectableText(
+          textAfter,
+          style: TextStyle(
+            color: Colors.white.withOpacity(0.8),
+            fontSize: 13,
+            height: 1.4,
+          ),
+        ));
+      }
+    }
+    
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: widgets,
+    );
+  }
+  
   Widget _buildSuccessPopup() {
     return Container(
       color: Colors.black54,
@@ -2643,14 +2870,7 @@ ${result.errorContext ?? 'нет данных'}
                                     color: Colors.white.withOpacity(0.03),
                                     borderRadius: BorderRadius.circular(12),
                                   ),
-                                  child: SelectableText(
-                                    msg.content,
-                                    style: TextStyle(
-                                      color: Colors.white.withOpacity(0.8),
-                                      fontSize: 13,
-                                      height: 1.4,
-                                    ),
-                                  ),
+                                  child: _buildMessageContent(msg.content, msgIndex),
                                 ),
                                 // Иконки под сообщением
                                 Padding(
@@ -2735,18 +2955,22 @@ ${result.errorContext ?? 'нет данных'}
                 ),
               ),
               const SizedBox(width: 4),
-              // Микрофон / Стоп
+              // Микрофон / Стоп (скрыт при загрузке)
+              if (!_chatLoading)
+                IconButton(
+                  onPressed: _toggleListening,
+                  icon: Icon(_isListening ? Icons.stop_rounded : Icons.mic_none),
+                  color: _isListening ? const Color(0xFFEF4444) : Colors.white38,
+                  tooltip: _isListening ? 'Остановить' : 'Голосовой ввод',
+                ),
+              // Отправить / Остановить запрос
               IconButton(
-                onPressed: _chatLoading ? null : _toggleListening,
-                icon: Icon(_isListening ? Icons.stop_rounded : Icons.mic_none),
-                color: _isListening ? const Color(0xFFEF4444) : Colors.white38,
-                tooltip: _isListening ? 'Остановить' : 'Голосовой ввод',
-              ),
-              // Отправить
-              IconButton(
-                onPressed: _chatLoading ? null : _handleSend,
-                icon: const Icon(Icons.send),
-                color: const Color(0xFF3B82F6),
+                onPressed: _chatLoading ? _cancelChat : _handleSend,
+                icon: Icon(_chatLoading ? Icons.stop_rounded : Icons.send),
+                color: _chatLoading 
+                    ? const Color(0xFFEF4444) 
+                    : const Color(0xFF3B82F6),
+                tooltip: _chatLoading ? 'Остановить' : 'Отправить',
               ),
             ],
           ),
