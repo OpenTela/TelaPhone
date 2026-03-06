@@ -478,6 +478,7 @@ async function buildApp(xmlStr) {
   currentPage = null;
   activeTimers.forEach(function(t) { clearInterval(t); });
   activeTimers = [];
+  window._appOnclicks = [];  // Reset for autoTest
 
   var screen = document.getElementById("screen");
   document.getElementById("load-screen").style.display = "none";
@@ -703,6 +704,11 @@ function buildButton(xml, parent) {
   applyVisible(el, xml); applyText(el, xml);
   var oc = xml.getAttribute("onclick");
   var hr = xml.getAttribute("href");
+  if (oc) {
+    el.dataset.onclick = oc;
+    if (!window._appOnclicks) window._appOnclicks = [];
+    if (window._appOnclicks.indexOf(oc) === -1) window._appOnclicks.push(oc);
+  }
   el.addEventListener("click", function() {
     if (hr) navigateTo(hr);
     else if (oc) callLua(oc);
@@ -819,6 +825,62 @@ window.loadApp = function(code) {
 // --- Init ---
 clog("Loading Lua...", "ci");
 
+// --- Auto Test: click all buttons, collect errors ---
+var autoTestErrors = [];
+var autoTestRunning = false;
+
+function runAutoTest() {
+  if (!luaReady) return { success: false, error: "Lua not ready" };
+  
+  autoTestErrors = [];
+  autoTestRunning = true;
+  
+  // Collect all onclick functions
+  var onclickFuncs = new Set();
+  var buttons = document.querySelectorAll('.fc-button');
+  buttons.forEach(function(btn) {
+    // Get onclick from our metadata
+    var oc = btn.dataset.onclick;
+    if (oc) onclickFuncs.add(oc);
+  });
+  
+  // Also collect from parsed app
+  if (window._appOnclicks) {
+    window._appOnclicks.forEach(function(fn) { onclickFuncs.add(fn); });
+  }
+  
+  // Test each function
+  var results = [];
+  onclickFuncs.forEach(function(fn) {
+    try {
+      var f = luaEngine.global.get(fn);
+      if (typeof f === "function") {
+        f();
+        results.push({ func: fn, status: "ok" });
+      } else {
+        results.push({ func: fn, status: "error", message: fn + " is not a function" });
+        autoTestErrors.push(fn + " is not a function");
+      }
+    } catch(err) {
+      results.push({ func: fn, status: "error", message: err.message });
+      autoTestErrors.push(fn + "(): " + err.message);
+    }
+  });
+  
+  autoTestRunning = false;
+  
+  return {
+    success: autoTestErrors.length === 0,
+    tested: results.length,
+    errors: autoTestErrors,
+    results: results
+  };
+}
+
+// Expose for Flutter
+window.runAutoTest = runAutoTest;
+window.getAutoTestErrors = function() { return autoTestErrors; };
+
 var factory = new wasmoon.LuaFactory();
 factory.createEngine().then(function(engine) {
   luaEngine = engine;
@@ -828,13 +890,33 @@ factory.createEngine().then(function(engine) {
   
   // Autoload only on /app path
   if (window.location.pathname === '/app') {
+    var autoTest = new URLSearchParams(window.location.search).get('autotest') === '1';
+    
     fetch('/app/code').then(function(res) {
       if (res.ok) return res.text();
       return null;
     }).then(function(code) {
       if (code) {
         clog("Auto-loading app...", "ci");
-        buildApp(code).catch(function(e) { clog("[auto-err] " + e.message, "ce"); });
+        buildApp(code).then(function() {
+          // Run auto-test if requested
+          if (autoTest) {
+            clog("[autotest] Starting...", "ci");
+            setTimeout(function() {
+              var result = runAutoTest();
+              if (result.success) {
+                clog("[autotest] PASS: " + result.tested + " functions tested", "ci");
+              } else {
+                result.errors.forEach(function(err) {
+                  clog("[autotest-error] " + err, "ce");
+                });
+                clog("[autotest] FAIL: " + result.errors.length + " errors", "ce");
+              }
+              // Signal completion
+              clog("[autotest-done] " + JSON.stringify(result), "ci");
+            }, 500); // Wait for timers/init
+          }
+        }).catch(function(e) { clog("[auto-err] " + e.message, "ce"); });
       } else {
         clog("No app loaded. Go to / to enter code.", "cw");
       }

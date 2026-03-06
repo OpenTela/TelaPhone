@@ -20,7 +20,8 @@ echo ==========================================
 echo   [OK] Build complete!
 echo ==========================================
 echo.
-echo APK: %CD%\build\app\outputs\flutter-apk\app-release.apk
+copy %CD%\build\app\outputs\flutter-apk\app-release.apk %CD%\build\release.apk
+echo APK: %CD%\build\release.apk
 echo.
 
 pause

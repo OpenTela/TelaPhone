@@ -13,6 +13,7 @@ import 'package:socks5_proxy/socks_client.dart';
 import 'package:speech_to_text/speech_to_text.dart';
 import '../services/ble_service.dart';
 import '../services/local_server.dart';
+import '../services/headless_test_service.dart';
 import 'emulator_screen.dart';
 
 /// Доступные ресурсы для промптов
@@ -1045,6 +1046,9 @@ class _EditorPageState extends State<_EditorPage> with SingleTickerProviderState
     
     // Отслеживаем ручные изменения имени
     _nameController.addListener(_onNameChanged);
+    
+    // Прогреваем headless WebView для быстрого тестирования
+    HeadlessTestService().warmup();
   }
   
   void _onNameChanged() {
@@ -1281,8 +1285,17 @@ ${result.errorContext ?? 'нет данных'}
   }
 
   Future<void> _push() async {
-    final name = _nameController.text.trim();
+    var name = _nameController.text.trim();
     final content = _contentController.text;
+
+    // Автозаполнение имени из title в коде
+    if (name.isEmpty) {
+      final title = _extractTitle(content);
+      if (title != null && title.isNotEmpty && title != 'example') {
+        name = title.toLowerCase();
+        _nameController.text = name;
+      }
+    }
 
     if (name.isEmpty) {
       setState(() => _error = 'Введите имя приложения');
@@ -1315,7 +1328,17 @@ ${result.errorContext ?? 'нет данных'}
   Future<void> _saveLocal({bool silent = false}) async {
     try {
       final dir = await getApplicationDocumentsDirectory();
-      final name = _nameController.text.trim();
+      var name = _nameController.text.trim();
+      
+      // Автозаполнение имени из title в коде
+      if (name.isEmpty) {
+        final title = _extractTitle(_contentController.text);
+        if (title != null && title.isNotEmpty && title != 'example') {
+          name = title.toLowerCase();
+          _nameController.text = name;
+        }
+      }
+      
       if (name.isEmpty) {
         if (!silent) _showNotification('Введите имя приложения', isError: true);
         return;
@@ -2202,91 +2225,79 @@ ${result.errorContext ?? 'нет данных'}
     }
   }
   
-  /// Фоновая валидация: загружаем код на сервер, ждём, проверяем console
+  /// Фоновая валидация: быстрая XML проверка + runtime тест через headless WebView
   Future<void> _validateInBackground(String code) async {
-    // Сначала базовая проверка
-    final basicValidation = _validateCode(code);
-    final basicErrors = basicValidation['errors'] as List<String>;
-    
-    if (basicErrors.isNotEmpty) {
-      // Базовые ошибки — автофикс
-      if (_autoFixAttempts < kMaxAutoFixAttempts) {
-        _autoFixAttempts++;
-        _requestAutoFix(basicErrors);
-      } else {
-        _autoFixAttempts = 0;
-        _applyCode(code);
-        _showNotification('Не удалось исправить за $kMaxAutoFixAttempts попыток', isError: true);
-      }
+    // === 1. БЫСТРАЯ ПРОВЕРКА XML (без Lua — это делает runtime) ===
+    if (!code.contains('<app')) {
+      _requestAutoFix(['Отсутствует тег <app>']);
+      return;
+    }
+    if (!code.contains('<ui')) {
+      _requestAutoFix(['Отсутствует секция <ui>']);
+      return;
+    }
+    if (!code.contains('<page')) {
+      _requestAutoFix(['Нет ни одной <page>']);
       return;
     }
     
-    // Базовые проверки прошли — пробуем запустить
+    // === 2. RUNTIME ТЕСТ через Headless WebView ===
     try {
-      final server = LocalServer();
-      final port = server.port;
+      final tester = HeadlessTestService();
+      final result = await tester.test(code, timeout: const Duration(seconds: 8));
       
-      // Очищаем console
-      await http.delete(Uri.parse('http://127.0.0.1:$port/console'));
+      debugPrint('[VALIDATE] Test result: $result');
       
-      // Загружаем код
-      await http.post(
-        Uri.parse('http://127.0.0.1:$port/app'),
-        headers: {'Content-Type': 'text/plain'},
-        body: code,
-      );
-      
-      // Ждём выполнения (достаточно для tick())
-      await Future.delayed(const Duration(milliseconds: 1500));
-      
-      // Проверяем console на ошибки
-      final consoleResp = await http.get(Uri.parse('http://127.0.0.1:$port/console'));
-      if (consoleResp.statusCode == 200) {
-        final data = jsonDecode(consoleResp.body);
-        final logs = data['logs'] as List? ?? [];
-        
-        // Ищем ошибки
-        final runtimeErrors = <String>[];
-        for (final log in logs) {
-          if (log['type'] == 'error') {
-            runtimeErrors.add(log['msg'] as String);
-          }
+      if (!result.success && result.errors.isNotEmpty) {
+        // Runtime ошибки — автофикс
+        if (_autoFixAttempts < kMaxAutoFixAttempts) {
+          _autoFixAttempts++;
+          _requestAutoFix(result.errors);
+        } else {
+          _autoFixAttempts = 0;
+          _applyCode(code);
+          _showNotification('Не удалось исправить за $kMaxAutoFixAttempts попыток', isError: true);
         }
-        
-        if (runtimeErrors.isNotEmpty && mounted) {
-          // Runtime ошибки — автофикс
-          if (_autoFixAttempts < kMaxAutoFixAttempts) {
-            _autoFixAttempts++;
-            _requestAutoFix(runtimeErrors);
-          } else {
-            _autoFixAttempts = 0;
-            _applyCode(code);
-            _showNotification('Не удалось исправить за $kMaxAutoFixAttempts попыток', isError: true);
-          }
-          return;
-        }
+        return;
       }
       
-      // Всё ок — проверяем визуальные warnings
+      // Warnings
+      if (result.warnings.isNotEmpty && mounted) {
+        _sendLayoutWarnings(result.warnings);
+      }
+      
+      // Всё ок — показываем popup
+      if (mounted) {
+        _autoFixAttempts = 0;
+        _showPopup(code);
+      }
+      
+    } catch (e) {
+      debugPrint('[VALIDATE] Headless test error: $e');
+      
+      // Fallback на legacy validation
+      final basicValidation = _validateCode(code);
+      final basicErrors = basicValidation['errors'] as List<String>;
+      
+      if (basicErrors.isNotEmpty) {
+        if (_autoFixAttempts < kMaxAutoFixAttempts) {
+          _autoFixAttempts++;
+          _requestAutoFix(basicErrors);
+        } else {
+          _autoFixAttempts = 0;
+          _applyCode(code);
+          _showNotification('Не удалось исправить за $kMaxAutoFixAttempts попыток', isError: true);
+        }
+        return;
+      }
+      
+      // Legacy warnings
       final basicWarnings = basicValidation['warnings'] as List<String>;
       if (basicWarnings.isNotEmpty && mounted) {
         _sendLayoutWarnings(basicWarnings);
       }
       
       // Показываем popup
-      if (mounted) {
-        _autoFixAttempts = 0;
-        _showPopup(code);
-      }
-    } catch (e) {
-      // Ошибка HTTP — не смогли проверить через сервер, 
-      // но базовая валидация прошла, показываем popup
-      debugPrint('[VALIDATE] HTTP error: $e');
-      final basicWarnings = basicValidation['warnings'] as List<String>;
-      if (basicWarnings.isNotEmpty && mounted) {
-        _sendLayoutWarnings(basicWarnings);
-      }
-      // Показываем popup только если ещё не показан
       if (mounted && _pendingCode == code) {
         _autoFixAttempts = 0;
         _showPopup(code);
@@ -2392,16 +2403,16 @@ ${result.errorContext ?? 'нет данных'}
                       child: CircularProgressIndicator(
                           strokeWidth: 2, color: Color(0xFF3B82F6)),
                     )
-                  : Icon(Icons.watch, size: 20, 
+                  : Icon(Icons.ios_share, size: 20, 
                       color: connected ? null : Colors.white24),
               color: const Color(0xFF3B82F6),
               tooltip: connected ? 'На устройство' : 'Нет подключения',
             ),
-            // Export / Поделиться
+            // Export / Поделиться файлом
             IconButton(
               onPressed: _contentController.text.isNotEmpty ? _exportCode : null,
-              icon: const Icon(Icons.upload, size: 22),
-              tooltip: 'Экспорт',
+              icon: const Icon(Icons.share, size: 20),
+              tooltip: 'Поделиться',
             ),
             const SizedBox(width: 4),
           ],

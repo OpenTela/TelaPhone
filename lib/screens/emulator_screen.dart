@@ -417,7 +417,7 @@ class _EmulatorScreenState extends State<EmulatorScreen> {
                     height: 18,
                     child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFF3B82F6)),
                   )
-                : const Icon(Icons.cloud_upload_outlined),
+                : const Icon(Icons.ios_share),
             color: const Color(0xFF3B82F6),
             tooltip: 'Залить на устройство',
             onPressed: _deploying ? null : _deploy,

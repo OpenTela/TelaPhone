@@ -26,6 +26,7 @@ dependencies:
   # WebView для эмулятора
   webview_flutter: ^4.4.0
   webview_flutter_android: ^3.12.0
+  flutter_inappwebview: ^6.0.0  # Headless testing
   
   # Local HTTP server
   shelf: ^1.4.1
