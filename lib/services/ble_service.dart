@@ -135,12 +135,12 @@ class BleService extends ChangeNotifier {
         final data = json.decode(response.body);
         final models = (data['data'] as List)
             .map((m) => m['id'] as String)
-            // Whitelist: только чат-модели
+            // Whitelist: чат-модели
             .where((id) => 
                 id.startsWith('gpt-') ||
                 id.startsWith('chatgpt-') ||
-                RegExp(r'^o\d').hasMatch(id))  // o1, o3, o4, o7...
-            // Blacklist: не-чат варианты
+                RegExp(r'^o\d').hasMatch(id))  // o1, o3, o4...
+            // Blacklist: только точно не-чат
             .where((id) => 
                 !id.contains('audio') &&
                 !id.contains('tts') &&
@@ -148,24 +148,38 @@ class BleService extends ChangeNotifier {
                 !id.contains('whisper') &&
                 !id.contains('realtime') &&
                 !id.contains('moderation') &&
-                !id.contains('instruct') &&
-                !RegExp(r'-\d{4}-\d{2}-\d{2}$').hasMatch(id))
+                !id.contains('embedding') &&
+                !id.startsWith('gpt-image') &&      // image generation
+                !id.startsWith('chatimage') &&      // image generation
+                !RegExp(r'-\d{4}-\d{2}-\d{2}$').hasMatch(id))  // dated snapshots
             .toList();
         
-        // Сортировка: новые и мощные сверху
+        // Сортировка: по версии (универсальная)
         models.sort((a, b) {
-          int rank(String m) {
-            if (RegExp(r'^o\d').hasMatch(m)) return 0;
-            if (m.startsWith('gpt-5')) return 1;
-            if (m.startsWith('gpt-4o')) return 2;
-            if (m.startsWith('gpt-4')) return 3;
-            if (m.startsWith('gpt-3')) return 4;
-            if (m.startsWith('chatgpt')) return 5;
-            return 6;
+          // Извлекаем версию из имени модели
+          double version(String m) {
+            // o4-mini -> 104, o3-pro -> 103 (o-модели выше gpt)
+            final oMatch = RegExp(r'^o(\d+)').firstMatch(m);
+            if (oMatch != null) return 100.0 + int.parse(oMatch.group(1)!);
+            
+            // gpt-5.2-codex -> 5.2, gpt-4.1-nano -> 4.1
+            final vMatch = RegExp(r'(\d+)\.(\d+)').firstMatch(m);
+            if (vMatch != null) {
+              return double.parse('${vMatch.group(1)}.${vMatch.group(2)}');
+            }
+            
+            // gpt-5 -> 5.0, gpt-4 -> 4.0
+            final majorMatch = RegExp(r'gpt-(\d+)').firstMatch(m);
+            if (majorMatch != null) return double.parse(majorMatch.group(1)!);
+            
+            return 0.0;
           }
-          final r = rank(a).compareTo(rank(b));
-          if (r != 0) return r;
-          return b.compareTo(a);
+          
+          // Сначала по версии (убывание), потом алфавитно
+          final vA = version(a);
+          final vB = version(b);
+          if (vA != vB) return vB.compareTo(vA);
+          return a.compareTo(b);
         });
         
         _cachedOpenaiModels = models.isNotEmpty ? models : fallbackModels['openai']!;

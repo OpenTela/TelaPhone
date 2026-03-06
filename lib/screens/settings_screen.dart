@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../services/ble_service.dart';
 import '../services/local_server.dart';
+import '../services/foreground_service.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -17,7 +18,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _scanning = false;
 
   bool _autoConnect = true;
-  bool _backgroundMode = false;
+  bool _autoRunOnBoot = false;
+  bool _batteryOptimizationOff = false;
   bool _remoteDebug = false;
 
   @override
@@ -28,10 +30,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Future<void> _loadSettings() async {
     final prefs = await SharedPreferences.getInstance();
+    final batteryOff = await BleBackgroundService.isBatteryOptimizationOff;
     if (!mounted) return;
     setState(() {
       _remoteDebug = prefs.getBool('remote_debug') ?? false;
+      _autoRunOnBoot = prefs.getBool('auto_run_on_boot') ?? false;
+      _batteryOptimizationOff = batteryOff;
     });
+  }
+
+  Future<void> _saveAutoRunOnBoot(bool value) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('auto_run_on_boot', value);
+    setState(() => _autoRunOnBoot = value);
   }
 
   Future<void> _saveRemoteDebug(bool value) async {
@@ -620,14 +631,38 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     ),
                     Divider(height: 1, color: Colors.white.withOpacity(0.05)),
                     SwitchListTile(
-                      title: const Text('Фоновый режим',
+                      title: const Text('Запуск при загрузке',
                           style: TextStyle(color: Colors.white70)),
-                      subtitle: Text('Работать при сворачивании (скоро)',
+                      subtitle: Text('Запускать при включении телефона',
                           style: TextStyle(
                               color: Colors.white.withOpacity(0.3),
                               fontSize: 12)),
-                      value: _backgroundMode,
-                      onChanged: null,
+                      value: _autoRunOnBoot,
+                      onChanged: (v) => _saveAutoRunOnBoot(v),
+                    ),
+                    Divider(height: 1, color: Colors.white.withOpacity(0.05)),
+                    ListTile(
+                      title: const Text('Оптимизация батареи',
+                          style: TextStyle(color: Colors.white70)),
+                      subtitle: Text(
+                          _batteryOptimizationOff
+                              ? 'Отключена — приложение работает стабильно'
+                              : 'Включена — Android может закрыть приложение',
+                          style: TextStyle(
+                              color: _batteryOptimizationOff
+                                  ? const Color(0xFF22C55E).withOpacity(0.8)
+                                  : const Color(0xFFF59E0B).withOpacity(0.8),
+                              fontSize: 12)),
+                      trailing: _batteryOptimizationOff
+                          ? const Icon(Icons.check_circle, color: Color(0xFF22C55E))
+                          : TextButton(
+                              onPressed: () async {
+                                await BleBackgroundService.requestBatteryOptimizationOff();
+                                final isOff = await BleBackgroundService.isBatteryOptimizationOff;
+                                if (mounted) setState(() => _batteryOptimizationOff = isOff);
+                              },
+                              child: const Text('Отключить'),
+                            ),
                     ),
                   ],
                 ),

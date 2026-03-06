@@ -9,6 +9,7 @@ import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 
 import 'services/ble_service.dart';
 import 'services/foreground_service.dart';
+import 'services/onboarding_dialog.dart';
 import 'screens/home_screen.dart';
 import 'screens/commands_screen.dart';
 import 'screens/screenshot_screen.dart';
@@ -142,6 +143,9 @@ class MainNavigationState extends State<MainNavigation> {
           ),
         );
       });
+      
+      // Показать onboarding при первом запуске
+      OnboardingDialog.showIfNeeded(context);
     });
   }
 
