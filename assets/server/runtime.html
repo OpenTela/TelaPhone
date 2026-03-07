@@ -229,6 +229,7 @@ document.getElementById("clear-btn").addEventListener("click", function(e) {
 
 // --- Globals ---
 var appState = {};
+var stateTypes = {};  // Типы переменных: 'int', 'float', 'bool', 'string'
 var bindings = {};
 var pages = {};
 var widgets = {};
@@ -238,11 +239,51 @@ var activeTimers = [];
 var luaEngine = null;
 var luaReady = false;
 
-function getState(key) { return appState["_" + key] || ""; }
+// Приведение к типу
+function coerceState(key, value) {
+  var type = stateTypes[key] || 'string';
+  switch (type) {
+    case 'int':
+      var n = parseInt(value, 10);
+      return isNaN(n) ? 0 : n;
+    case 'float':
+      var f = parseFloat(value);
+      return isNaN(f) ? 0.0 : f;
+    case 'bool':
+      if (typeof value === 'boolean') return value;
+      if (typeof value === 'number') return value !== 0;
+      return value === 'true' || value === '1';
+    default:
+      return String(value ?? '');
+  }
+}
+
+// Получить типизированное значение (для Lua)
+function getState(key) {
+  var val = appState["_" + key];
+  if (val === undefined) {
+    var type = stateTypes[key] || 'string';
+    if (type === 'int' || type === 'float') return 0;
+    if (type === 'bool') return false;
+    return '';
+  }
+  return val;
+}
+
+// Получить как строку (для UI bindings)
+function getStateStr(key) {
+  var val = appState["_" + key];
+  if (val === undefined) return '';
+  if (typeof val === 'boolean') return val ? 'true' : 'false';
+  return String(val);
+}
+
+// Установить с приведением типа
 function setState(key, value) {
-  var s = String(value);
-  if (appState["_" + key] === s) return;
-  appState["_" + key] = s;
+  var typed = coerceState(key, value);
+  var old = appState["_" + key];
+  if (old === typed) return;
+  appState["_" + key] = typed;
   var fns = bindings[key];
   if (fns) { for (var i = 0; i < fns.length; i++) fns[i](); }
 }
@@ -256,7 +297,7 @@ function extractVars(t) {
   return v;
 }
 function resolve(t) {
-  return t.replace(/\{(\w+)\}/g, function(_, k) { return getState(k); });
+  return t.replace(/\{(\w+)\}/g, function(_, k) { return getStateStr(k); });
 }
 
 // --- Lua via Wasmoon ---
@@ -300,11 +341,11 @@ async function setupLua(app) {
   if (!luaReady || !luaEngine) return;
   var G = luaEngine.global;
   G.set("__fc_get_state", function(key) { return getState(key); });
-  G.set("__fc_set_state", function(key, val) { setState(key, String(val)); });
+  G.set("__fc_set_state", function(key, val) { setState(key, val); });  // coerceState в setState обработает любой тип
   await luaEngine.doString(
     "state = setmetatable({}, {" +
     "  __index = function(t, k) return __fc_get_state(k) end," +
-    "  __newindex = function(t, k, v) __fc_set_state(k, tostring(v)) end" +
+    "  __newindex = function(t, k, v) __fc_set_state(k, v) end" +  // Без tostring - передаём как есть
     "})"
   );
   G.set("navigate", function(page) { navigateTo(page); });
@@ -337,6 +378,63 @@ async function setupLua(app) {
   });
   G.set("app_launch", function(name) { clog("[lua] app_launch: " + name, "ci"); });
   G.set("app_home", function() { clog("[lua] app_home", "ci"); });
+
+  // Полифиллы для os.time и os.date (wasmoon не поддерживает таблицы в os.time)
+  G.set("__js_time", function(y, m, d, h, min, s) {
+    if (y === undefined) return Math.floor(Date.now() / 1000);
+    var date = new Date(y, (m || 1) - 1, d || 1, h || 0, min || 0, s || 0);
+    return Math.floor(date.getTime() / 1000);
+  });
+  G.set("__js_date", function(fmt, ts) {
+    var d = ts ? new Date(ts * 1000) : new Date();
+    if (fmt === "*t") {
+      // Lua standard: wday 1=Sunday, 2=Monday, ... 7=Saturday
+      // JS: getDay() 0=Sunday, 1=Monday, ... 6=Saturday
+      var jsWday = d.getDay();  // 0-6
+      var luaWday = jsWday + 1;  // 1-7 (1=Sunday)
+      return {
+        year: d.getFullYear(),
+        month: d.getMonth() + 1,
+        day: d.getDate(),
+        hour: d.getHours(),
+        min: d.getMinutes(),
+        sec: d.getSeconds(),
+        wday: luaWday,
+        yday: Math.floor((d - new Date(d.getFullYear(), 0, 0)) / 86400000)
+      };
+    }
+    // Простой формат
+    var pad = function(n) { return n < 10 ? "0" + n : "" + n; };
+    return (fmt || "%c")
+      .replace("%Y", d.getFullYear())
+      .replace("%m", pad(d.getMonth() + 1))
+      .replace("%d", pad(d.getDate()))
+      .replace("%H", pad(d.getHours()))
+      .replace("%M", pad(d.getMinutes()))
+      .replace("%S", pad(d.getSeconds()))
+      .replace("%c", d.toLocaleString());
+  });
+  
+  await luaEngine.doString(`
+    local _orig_os_time = os.time
+    local _orig_os_date = os.date
+    
+    os.time = function(t)
+      if t == nil then
+        return __js_time()
+      else
+        return __js_time(t.year, t.month, t.day, t.hour, t.min, t.sec)
+      end
+    end
+    
+    os.date = function(fmt, ts)
+      if fmt == "*t" then
+        return __js_date("*t", ts)
+      else
+        return __js_date(fmt or "%c", ts)
+      end
+    end
+  `);
 
   var se = app.querySelector("script");
   if (se && se.textContent && se.textContent !== "X") {
@@ -461,6 +559,18 @@ window.validateCode = function(xmlStr) {
     if (!luaFuncs[fn]) errors.push({code: "MISSING_FUNC", msg: fn + " не найдена"});
   }
   
+  // Check for emoji (шрифт не поддерживает)
+  // Regex для Unicode emoji и символов выше базовой латиницы (кроме кириллицы)
+  var emojiRegex = /[\u{1F300}-\u{1F9FF}]|[\u{2600}-\u{26FF}]|[\u{2700}-\u{27BF}]|[\u{FE00}-\u{FE0F}]|[\u{1F000}-\u{1F02F}]|[\u{1F0A0}-\u{1F0FF}]|[\u25B6\u25C0\u23F8-\u23FA]/gu;
+  var emojiMatches = xmlStr.match(emojiRegex);
+  if (emojiMatches) {
+    var unique = [...new Set(emojiMatches)];
+    errors.push({
+      code: "EMOJI", 
+      msg: "Unicode emoji запрещены (шрифт не поддерживает): " + unique.slice(0,5).join(" ") + " — используй текст или иконки"
+    });
+  }
+  
   return {
     valid: errors.length === 0, 
     errors: errors, 
@@ -488,6 +598,17 @@ async function buildApp(xmlStr) {
   clog("Parsing...", "ci");
   var app = parseXML(xmlStr);
 
+  // Проверка на emoji
+  var emojiRegex = /[\u{1F300}-\u{1F9FF}]|[\u{2600}-\u{26FF}]|[\u{2700}-\u{27BF}]|[\u{FE00}-\u{FE0F}]|[\u{1F000}-\u{1F02F}]|[\u{1F0A0}-\u{1F0FF}]|[\u25B6\u25C0\u23F8-\u23FA]/gu;
+  var emojiMatches = xmlStr.match(emojiRegex);
+  if (emojiMatches) {
+    var unique = [...new Set(emojiMatches)];
+    clog("[error] Unicode emoji запрещены: " + unique.slice(0,5).join(" ") + " — используй текст или иконки", "ce");
+  }
+
+  // Сбрасываем типы при новом приложении
+  stateTypes = {};
+  
   var stateEl = app.querySelector("state");
   if (stateEl) {
     var ch = stateEl.children;
@@ -495,7 +616,12 @@ async function buildApp(xmlStr) {
       var tagName = ch[i].tagName.toLowerCase();
       var name = ch[i].getAttribute("name");
       var def = ch[i].getAttribute("default") || "";
-      appState["_" + name] = def;
+      
+      // Сохраняем тип
+      stateTypes[name] = tagName;
+      
+      // Приводим default к правильному типу
+      appState["_" + name] = coerceState(name, def);
       
       // Проверка: <string> с числовым default — ошибка!
       if (tagName === "string" && def !== "" && /^-?\d+\.?\d*$/.test(def)) {
@@ -623,7 +749,7 @@ function applyColor(el, xml, attr, prop) {
   if (!v) return;
   if (v.charAt(0) === "{" && v.charAt(v.length - 1) === "}") {
     var varName = v.substring(1, v.length - 1);
-    var fn = function() { var c = getState(varName); if (c) el.style[prop] = c; };
+    var fn = function() { var c = getStateStr(varName); if (c) el.style[prop] = c; };
     sub(varName, fn); fn();
   } else el.style[prop] = v;
 }
@@ -634,7 +760,7 @@ function applyVisible(el, xml) {
   if (v.charAt(0) === "{" && v.charAt(v.length - 1) === "}") {
     var varName = v.substring(1, v.length - 1);
     var fn = function() {
-      var s = getState(varName);
+      var s = getStateStr(varName);
       el.classList.toggle("fc-hidden", s !== "true" && s !== "1");
     };
     sub(varName, fn); fn();
@@ -737,7 +863,7 @@ function buildInput(xml, parent) {
   if (ph) el.placeholder = ph;
   var bind = xml.getAttribute("bind");
   if (bind) {
-    var fn = function() { if (document.activeElement !== el) el.value = getState(bind); };
+    var fn = function() { if (document.activeElement !== el) el.value = getStateStr(bind); };
     sub(bind, fn); fn();
     el.addEventListener("input", function() { setState(bind, el.value); });
   }
@@ -765,7 +891,7 @@ function buildSlider(xml, parent) {
   el.max = xml.getAttribute("max") || "100";
   var bind = xml.getAttribute("bind");
   if (bind) {
-    var fn = function() { el.value = getState(bind) || "0"; };
+    var fn = function() { el.value = getStateStr(bind) || "0"; };
     sub(bind, fn); fn();
     el.addEventListener("input", function() { setState(bind, el.value); });
   }
@@ -782,7 +908,9 @@ function buildSwitch(xml, parent) {
   if (!xml.getAttribute("h")) el.style.height = "26px";
   var bind = xml.getAttribute("bind");
   function render() {
-    var on = bind ? (getState(bind) === "true") : false;
+    // getState для bool возвращает boolean, для строки — сравниваем со строкой
+    var val = getState(bind);
+    var on = (val === true) || (val === "true") || (val === "1");
     el.style.background = on ? "#4caf50" : "#555";
     el.style.borderRadius = "13px";
     el.innerHTML = '<div style="width:22px;height:22px;background:#fff;border-radius:50%;position:absolute;top:2px;left:' + (on ? "26px" : "2px") + ';transition:left 0.15s"></div>';
@@ -790,7 +918,9 @@ function buildSwitch(xml, parent) {
   if (bind) {
     sub(bind, render); render();
     el.addEventListener("click", function() {
-      setState(bind, getState(bind) === "true" ? "false" : "true");
+      var val = getState(bind);
+      var isOn = (val === true) || (val === "true") || (val === "1");
+      setState(bind, isOn ? "false" : "true");
     });
   }
   applyVisible(el, xml);
