@@ -492,9 +492,15 @@ async function buildApp(xmlStr) {
   if (stateEl) {
     var ch = stateEl.children;
     for (var i = 0; i < ch.length; i++) {
+      var tagName = ch[i].tagName.toLowerCase();
       var name = ch[i].getAttribute("name");
       var def = ch[i].getAttribute("default") || "";
       appState["_" + name] = def;
+      
+      // Проверка: <string> с числовым default — ошибка!
+      if (tagName === "string" && def !== "" && /^-?\d+\.?\d*$/.test(def)) {
+        clog("[error] '" + name + "' объявлен как <string> но default=\"" + def + "\" — число. Используй <int> или <float>", "ce");
+      }
     }
     clog("State: " + ch.length + " vars", "ci");
   }
@@ -704,10 +710,14 @@ function buildButton(xml, parent) {
   applyVisible(el, xml); applyText(el, xml);
   var oc = xml.getAttribute("onclick");
   var hr = xml.getAttribute("href");
+  var oh = xml.getAttribute("onhold");
   if (oc) {
     el.dataset.onclick = oc;
     if (!window._appOnclicks) window._appOnclicks = [];
     if (window._appOnclicks.indexOf(oc) === -1) window._appOnclicks.push(oc);
+  }
+  if (oh) {
+    el.dataset.onhold = oh;
   }
   el.addEventListener("click", function() {
     if (hr) navigateTo(hr);
@@ -733,9 +743,14 @@ function buildInput(xml, parent) {
   }
   var onenter = xml.getAttribute("onenter");
   if (onenter) {
+    el.dataset.onenter = onenter;  // Store for autotest
     el.addEventListener("keydown", function(e) {
       if (e.key === "Enter") { e.preventDefault(); el.blur(); callLua(onenter); }
     });
+  }
+  var onblur = xml.getAttribute("onblur");
+  if (onblur) {
+    el.dataset.onblur = onblur;  // Store for autotest
   }
   parent.appendChild(el);
 }
@@ -835,35 +850,68 @@ function runAutoTest() {
   autoTestErrors = [];
   autoTestRunning = true;
   
-  // Collect all onclick functions
-  var onclickFuncs = new Set();
-  var buttons = document.querySelectorAll('.fc-button');
-  buttons.forEach(function(btn) {
-    // Get onclick from our metadata
-    var oc = btn.dataset.onclick;
-    if (oc) onclickFuncs.add(oc);
+  // Collect ALL handler functions from visible widgets
+  var handlers = new Map(); // func name -> { types: [], elements: [] }
+  
+  // Find all widgets in the visible page
+  var activePage = document.querySelector('.fc-page[data-active="true"]');
+  if (!activePage) {
+    activePage = document.querySelector('.fc-page');
+  }
+  
+  var allWidgets = activePage ? activePage.querySelectorAll('*') : document.querySelectorAll('.fc-button, .fc-label, .fc-input, .fc-switch, .fc-slider');
+  
+  allWidgets.forEach(function(el) {
+    // Collect from dataset
+    ['onclick', 'onchange', 'onenter', 'onhold', 'onblur'].forEach(function(eventType) {
+      var fn = el.dataset[eventType];
+      if (fn && fn.trim()) {
+        if (!handlers.has(fn)) {
+          handlers.set(fn, { types: [], elements: [] });
+        }
+        handlers.get(fn).types.push(eventType);
+        handlers.get(fn).elements.push(el.id || el.className);
+      }
+    });
   });
   
-  // Also collect from parsed app
+  // Also collect from _appOnclicks (for backwards compat)
   if (window._appOnclicks) {
-    window._appOnclicks.forEach(function(fn) { onclickFuncs.add(fn); });
+    window._appOnclicks.forEach(function(fn) {
+      if (!handlers.has(fn)) {
+        handlers.set(fn, { types: ['onclick'], elements: ['registered'] });
+      }
+    });
   }
   
   // Test each function
   var results = [];
-  onclickFuncs.forEach(function(fn) {
+  var tested = 0;
+  
+  handlers.forEach(function(info, fn) {
     try {
       var f = luaEngine.global.get(fn);
       if (typeof f === "function") {
-        f();
-        results.push({ func: fn, status: "ok" });
+        // Try to call it (onclick/onenter/onhold are safe to call)
+        // onchange might need state, but we still test it exists
+        if (info.types.includes('onclick') || info.types.includes('onenter') || info.types.includes('onhold')) {
+          f();
+        }
+        results.push({ func: fn, status: "ok", types: info.types });
+        tested++;
+      } else if (f === undefined || f === null) {
+        var errMsg = "Функция '" + fn + "' не найдена в Lua (используется в: " + info.types.join(', ') + ")";
+        results.push({ func: fn, status: "error", message: errMsg });
+        autoTestErrors.push(errMsg);
       } else {
-        results.push({ func: fn, status: "error", message: fn + " is not a function" });
-        autoTestErrors.push(fn + " is not a function");
+        var errMsg = "'" + fn + "' не является функцией (тип: " + typeof f + ")";
+        results.push({ func: fn, status: "error", message: errMsg });
+        autoTestErrors.push(errMsg);
       }
     } catch(err) {
-      results.push({ func: fn, status: "error", message: err.message });
-      autoTestErrors.push(fn + "(): " + err.message);
+      var errMsg = fn + "(): " + err.message;
+      results.push({ func: fn, status: "error", message: errMsg });
+      autoTestErrors.push(errMsg);
     }
   });
   
@@ -871,7 +919,8 @@ function runAutoTest() {
   
   return {
     success: autoTestErrors.length === 0,
-    tested: results.length,
+    tested: tested,
+    totalHandlers: handlers.size,
     errors: autoTestErrors,
     results: results
   };

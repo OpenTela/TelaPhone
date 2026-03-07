@@ -1010,6 +1010,12 @@ class _EditorPageState extends State<_EditorPage> with SingleTickerProviderState
   // Pending code from AI (for popup)
   String? _pendingCode;
   
+  // Код на валидации (показываем индикатор)
+  bool _validatingCode = false;
+  
+  // Проверка перед запуском в эмуляторе
+  bool _checkingBeforeRun = false;
+  
   // Счётчик попыток автоисправления
   int _autoFixAttempts = 0;
   
@@ -1224,6 +1230,42 @@ class _EditorPageState extends State<_EditorPage> with SingleTickerProviderState
         _tabController.animateTo(savedTabIndex);
       }
     });
+  }
+  
+  /// Проверить код и запустить в эмуляторе
+  Future<void> _checkAndRun() async {
+    final code = _contentController.text;
+    if (code.isEmpty) return;
+    
+    setState(() => _checkingBeforeRun = true);
+    
+    try {
+      final tester = HeadlessTestService();
+      final result = await tester.test(code, timeout: const Duration(seconds: 8));
+      
+      if (!mounted) return;
+      
+      if (!result.success && result.errors.isNotEmpty) {
+        // Есть ошибки — показываем и не запускаем
+        setState(() => _checkingBeforeRun = false);
+        
+        final errorList = result.errors.take(3).join('\n• ');
+        _showNotification('Ошибки:\n• $errorList', isError: true);
+        return;
+      }
+      
+      // Всё ок — запускаем
+      setState(() => _checkingBeforeRun = false);
+      _runInEmulator();
+      
+    } catch (e) {
+      // Ошибка проверки — запускаем всё равно, эмулятор сам покажет ошибки
+      debugPrint('[CHECK] Error: $e');
+      if (mounted) {
+        setState(() => _checkingBeforeRun = false);
+        _runInEmulator();
+      }
+    }
   }
   
   /// Автоисправление ошибки через AI
@@ -1461,21 +1503,11 @@ ${result.errorContext ?? 'нет данных'}
       }
       _chatLoading = true;
       _chatCancelled = false;  // Сброс флага отмены
-      _loadingPhrase = '...';  // Сначала просто точки
-    });
-    
-    // Через 1-3 сек показываем первую фразу
-    _warmupTimer?.cancel();
-    final warmupDelay = 1 + _random.nextInt(3); // 1-3 секунды
-    _warmupTimer = Timer(Duration(seconds: warmupDelay), () {
-      if (mounted && _chatLoading) {
-        setState(() => _loadingPhrase = _loadingPhrases[_random.nextInt(_loadingPhrases.length)]);
-      }
+      _loadingPhrase = _loadingPhrases[_random.nextInt(_loadingPhrases.length)];
     });
     
     // Через 15-25 сек меняем фразу на "долгое ожидание"
     _longWaitTimer?.cancel();
-    _warmupTimer?.cancel();
     final delay = 15 + _random.nextInt(11); // 15-25 секунд
     _longWaitTimer = Timer(Duration(seconds: delay), () {
       if (mounted && _chatLoading) {
@@ -1823,6 +1855,7 @@ ${result.errorContext ?? 'нет данных'}
       _contentController.text = code;
       _updateStats();
       _pendingCode = null;
+      _validatingCode = false;
       
       // Автоименовка: если имя не редактировалось вручную — берём из title
       if (!_nameManuallyEdited) {
@@ -2219,7 +2252,10 @@ ${result.errorContext ?? 'нет данных'}
     final code = _extractCode(response);
     
     if (code != null) {
-      setState(() => _pendingCode = code);
+      setState(() {
+        _pendingCode = code;
+        _validatingCode = true;
+      });
       // Фоновая валидация через HTTP
       _validateInBackground(code);
     }
@@ -2333,6 +2369,7 @@ ${result.errorContext ?? 'нет данных'}
     final message = '🔴 Код не принят (попытка $_autoFixAttempts/$kMaxAutoFixAttempts):\n$errorList\n\nРешение должно быть идеальным — исправь ВСЕ ошибки. Частичные решения не засчитываются.';
     
     setState(() {
+      _validatingCode = false;  // Сбрасываем — идём на новую генерацию
       _messages.add(_ChatMessage(role: 'user', content: message));
     });
     
@@ -2347,6 +2384,7 @@ ${result.errorContext ?? 'нет данных'}
   
   void _showPopup(String code) {
     setState(() {
+      _validatingCode = false;
       _successCode = code;
       _popupVisible = true;
     });
@@ -2384,14 +2422,21 @@ ${result.errorContext ?? 'нет данных'}
             },
           ),
           actions: [
-            // Run in emulator
+            // Run in emulator (с проверкой)
             IconButton(
-              onPressed: _contentController.text.isNotEmpty 
-                  ? () => _runInEmulator() 
+              onPressed: _contentController.text.isNotEmpty && !_checkingBeforeRun
+                  ? () => _checkAndRun() 
                   : null,
-              icon: const Icon(Icons.play_arrow_rounded, size: 22),
+              icon: _checkingBeforeRun
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(
+                          strokeWidth: 2, color: Color(0xFF22C55E)),
+                    )
+                  : const Icon(Icons.play_arrow_rounded, size: 22),
               color: const Color(0xFF22C55E),
-              tooltip: 'Запустить в эмуляторе',
+              tooltip: _checkingBeforeRun ? 'Проверка...' : 'Запустить в эмуляторе',
             ),
             // Push на часы (загрузка на устройство)
             IconButton(
@@ -2721,6 +2766,18 @@ ${result.errorContext ?? 'нет данных'}
                   style: TextStyle(
                       color: Colors.white.withOpacity(0.2), fontSize: 11)),
               const Spacer(),
+              // Индикатор проверки
+              if (_checkingBeforeRun) ...[
+                const SizedBox(
+                  width: 10, height: 10,
+                  child: CircularProgressIndicator(strokeWidth: 1.5, color: Color(0xFF22C55E)),
+                ),
+                const SizedBox(width: 6),
+                Text('Проверка...',
+                    style: TextStyle(
+                        color: const Color(0xFF22C55E).withOpacity(0.7), fontSize: 11)),
+                const SizedBox(width: 12),
+              ],
               Text('$_lines lines',
                   style: TextStyle(
                       color: Colors.white.withOpacity(0.2), fontSize: 11)),
@@ -2883,34 +2940,45 @@ ${result.errorContext ?? 'нет данных'}
                                   ),
                                   child: _buildMessageContent(msg.content, msgIndex),
                                 ),
-                                // Иконки под сообщением
+                                // Иконки под сообщением или индикатор проверки
                                 Padding(
                                   padding: const EdgeInsets.only(top: 6, left: 0),
                                   child: Row(
                                     children: [
-                                      // Copy
-                                      GestureDetector(
-                                        onTap: () {
-                                          Clipboard.setData(ClipboardData(text: msg.content));
-                                          _showNotification('Скопировано');
-                                        },
-                                        child: Icon(
-                                          Icons.copy_outlined,
-                                          size: 14,
-                                          color: Colors.white.withOpacity(0.25),
+                                      // Индикатор проверки (для последнего сообщения с кодом)
+                                      if (hasCode && _validatingCode && msgIndex == _messages.length - 1) ...[
+                                        const SizedBox(
+                                          width: 12, height: 12,
+                                          child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFF22C55E)),
                                         ),
-                                      ),
-                                      // Apply code (только если есть код)
-                                      if (hasCode) ...[
-                                        const SizedBox(width: 12),
+                                        const SizedBox(width: 8),
+                                        Text('Проверка кода...', 
+                                            style: TextStyle(color: Colors.white.withOpacity(0.5), fontSize: 12)),
+                                      ] else ...[
+                                        // Copy
                                         GestureDetector(
-                                          onTap: () => _confirmAndApplyCode(msg.content),
+                                          onTap: () {
+                                            Clipboard.setData(ClipboardData(text: msg.content));
+                                            _showNotification('Скопировано');
+                                          },
                                           child: Icon(
-                                            Icons.check_circle_outline,
+                                            Icons.copy_outlined,
                                             size: 14,
-                                            color: const Color(0xFF3B82F6).withOpacity(0.6),
+                                            color: Colors.white.withOpacity(0.25),
                                           ),
                                         ),
+                                        // Apply code (только если есть код)
+                                        if (hasCode) ...[
+                                          const SizedBox(width: 12),
+                                          GestureDetector(
+                                            onTap: () => _confirmAndApplyCode(msg.content),
+                                            child: Icon(
+                                              Icons.check_circle_outline,
+                                              size: 14,
+                                              color: const Color(0xFF3B82F6).withOpacity(0.6),
+                                            ),
+                                          ),
+                                        ],
                                       ],
                                     ],
                                   ),

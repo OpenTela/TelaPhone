@@ -27,12 +27,39 @@
 - **НЕ несколько `<label>` внутри `<button>`** — только первый сработает
 - **НЕ `fetch()` без `<config><network/></config>`**
 
-## Перед отправкой — проверь
+## Чеклист по секциям
 
+### `<state>`
+- Переменные в bind должны быть объявлены
+- **Числа → `<int>` или `<float>`, НЕ `<string>`!**
+```xml
+<!-- ❌ НЕПРАВИЛЬНО: state.month + 1 не сработает -->
+<string name="month" default="3"/>
+
+<!-- ✅ ПРАВИЛЬНО -->
+<int name="month" default="3"/>
+```
+
+### `<script>`
+- Каждая функция в onclick/onchange/onenter должна существовать
+- Баланс `end`: один `end` на каждый `function/if/for/while`
+```lua
+-- ❌ НЕПРАВИЛЬНО: не хватает end
+function test()
+  if x > 0 then
+    print("ok")
+
+-- ✅ ПРАВИЛЬНО
+function test()
+  if x > 0 then
+    print("ok")
+  end
+end
+```
+
+### `<ui>` / виджеты
 - Все теги закрыты
-- Функции в onclick есть в `<script>`
-- Переменные в bind объявлены в `<state>`
-- Lua: `end` для каждого `if/function/for`
+- id уникальны на странице
 
 ## Поведение
 
