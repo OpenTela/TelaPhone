@@ -58,9 +58,72 @@ document.getElementById("clear-btn").addEventListener("click", function(e) {
 });
 
 // ======================== GLOBALS ========================
-var appState = {}, stateTypes = {}, bindings = {}, pages = {}, widgets = {};
+var appState = {};
+var stateTypes = {};
+var bindings = {};
+var pages = {};
+var widgets = {};
 var groupDefaults = {}, groupPages = {}, groupOrient = {}, pageToGroup = {};
 var currentPage = null, activeTimers = [], luaEngine = null, luaReady = false;
+
+// ======================== STATE (typed) ========================
+function coerceState(key, value) {
+  var type = stateTypes[key] || "string";
+  switch (type) {
+    case "int":
+      var n = parseInt(value, 10);
+      return isNaN(n) ? 0 : n;
+    case "float":
+      var f = parseFloat(value);
+      return isNaN(f) ? 0.0 : f;
+    case "bool":
+      if (typeof value === "boolean") return value;
+      if (typeof value === "number") return value !== 0;
+      return value === "true" || value === "1";
+    default:
+      return String(value ?? "");
+  }
+}
+
+function getState(key) {
+  var val = appState["_" + key];
+  if (val === undefined) {
+    var type = stateTypes[key] || "string";
+    if (type === "int" || type === "float") return 0;
+    if (type === "bool") return false;
+    return "";
+  }
+  return val;
+}
+
+function getStateStr(key) {
+  var val = appState["_" + key];
+  if (val === undefined) return "";
+  if (typeof val === "boolean") return val ? "true" : "false";
+  return String(val);
+}
+
+function setState(key, value) {
+  var typed = coerceState(key, value);
+  var old = appState["_" + key];
+  if (old === typed) return;
+  appState["_" + key] = typed;
+  var fns = bindings[key];
+  if (fns) { for (var i = 0; i < fns.length; i++) fns[i](); }
+}
+
+function sub(key, fn) {
+  if (!bindings[key]) bindings[key] = [];
+  bindings[key].push(fn);
+}
+function extractVars(t) {
+  var v = [], r = /\{(\w+)\}/g, m;
+  while ((m = r.exec(t)) !== null) v.push(m[1]);
+  return v;
+}
+function resolve(t) {
+  return t.replace(/\{(\w+)\}/g, function(_, k) { return getStateStr(k); });
+}
 
 // ======================== UTILS ========================
 function normUnit(v) {
@@ -75,36 +138,6 @@ function normColor(v) {
   var n = parseInt(v);
   if (!isNaN(n) && String(n) === v.trim()) return "#" + n.toString(16).padStart(6, "0");
   return v;
-}
-
-// ======================== STATE ========================
-function getState(key) { return appState["_" + key] || ""; }
-function getStateLua(key) {
-  var v = appState["_" + key], t = stateTypes[key];
-  if (v === undefined || v === null) v = "";
-  if (t === "bool") return (v === "true" || v === "1");
-  if (t === "int") return parseInt(v) || 0;
-  if (t === "float") return parseFloat(v) || 0;
-  return v;
-}
-function setState(key, value) {
-  var s = String(value);
-  if (appState["_" + key] === s) return;
-  appState["_" + key] = s;
-  var fns = bindings[key];
-  if (fns) for (var i = 0; i < fns.length; i++) fns[i]();
-}
-function sub(key, fn) {
-  if (!bindings[key]) bindings[key] = [];
-  bindings[key].push(fn);
-}
-function extractVars(t) {
-  var v = [], r = /\{(\w+)\}/g, m;
-  while ((m = r.exec(t)) !== null) v.push(m[1]);
-  return v;
-}
-function resolve(t) {
-  return t.replace(/\{(\w+)\}/g, function(_, k) { return getState(k); });
 }
 
 // ======================== LUA ========================
@@ -134,12 +167,12 @@ function luaPreprocess(src) {
 async function setupLua(app) {
   if (!luaReady || !luaEngine) return;
   var G = luaEngine.global;
-  G.set("__fc_get_state", function(key) { return getStateLua(key); });
-  G.set("__fc_set_state", function(key, val) { setState(key, String(val)); });
+  G.set("__fc_get_state", function(key) { return getState(key); });
+  G.set("__fc_set_state", function(key, val) { setState(key, val); });
   await luaEngine.doString(
     "state = setmetatable({}, {" +
     "  __index = function(t, k) return __fc_get_state(k) end," +
-    "  __newindex = function(t, k, v) __fc_set_state(k, tostring(v)) end" +
+    "  __newindex = function(t, k, v) __fc_set_state(k, v) end" +
     "})"
   );
   G.set("navigate", function(page) { navigateTo(page); });
@@ -148,23 +181,25 @@ async function setupLua(app) {
     if (w && w.tagName === "INPUT") { w.focus(); return true; }
     return false;
   });
+  function cssVal(v) { var s = String(v); if (/^-?\d+(\.\d+)?$/.test(s)) return s + "px"; return s; }
   G.set("setAttr", function(id, attr, val) {
     var w = widgets[id]; if (!w) return;
-    if (attr === "bgcolor") w.style.backgroundColor = normColor(val);
+    if (attr === "bgcolor") w.style.background = normColor(val);
     else if (attr === "color") w.style.color = normColor(val);
     else if (attr === "text") w.textContent = val;
     else if (attr === "visible") w.classList.toggle("fc-hidden", val !== "true" && val !== "1");
-    else if (attr === "x") w.style.left = normUnit(val);
-    else if (attr === "y") w.style.top = normUnit(val);
-    else if (attr === "w") w.style.width = normUnit(val);
-    else if (attr === "h") w.style.height = normUnit(val);
-    else if (attr === "font") w.style.fontSize = (/^\d+$/.test(val) ? val + "px" : val);
-    else if (attr === "radius") w.style.borderRadius = (/^\d+$/.test(val) ? val + "px" : val);
+    else if (attr === "x") w.style.left = cssVal(val);
+    else if (attr === "y") w.style.top = cssVal(val);
+    else if (attr === "w") w.style.width = cssVal(val);
+    else if (attr === "h") w.style.height = cssVal(val);
+    else if (attr === "font") w.style.fontSize = cssVal(val);
+    else if (attr === "radius") w.style.borderRadius = cssVal(val);
     else if (attr === "opacity") w.style.opacity = val;
+    else if (attr === "z-index") w.style.zIndex = val;
   });
   G.set("getAttr", function(id, attr) {
     var w = widgets[id]; if (!w) return "";
-    if (attr === "bgcolor") return w.style.backgroundColor || "";
+    if (attr === "bgcolor") return w.style.background || w.style.backgroundColor || "";
     if (attr === "color") return w.style.color || "";
     if (attr === "text") return w.textContent || "";
     if (attr === "visible") return w.classList.contains("fc-hidden") ? "false" : "true";
@@ -175,6 +210,7 @@ async function setupLua(app) {
     if (attr === "font") return w.style.fontSize || "";
     if (attr === "radius") return w.style.borderRadius || "";
     if (attr === "opacity") return w.style.opacity || "";
+    if (attr === "z-index") return w.style.zIndex || "";
     return "";
   });
   G.set("print", function() {
@@ -182,8 +218,12 @@ async function setupLua(app) {
     for (var i = 0; i < arguments.length; i++) parts.push(String(arguments[i]));
     clog("[lua] " + parts.join("\t"));
   });
-  G.set("app_launch", function(name) { clog("[lua] app_launch: " + name, "ci"); });
-  G.set("app_home", function() { clog("[lua] app_home", "ci"); });
+  G.set("exit", function() { clog("[lua] exit()", "ci"); });
+  await luaEngine.doString("app = { launch = function(name) print('[app.launch] ' .. tostring(name)) end }");
+  G.set("setTimeout", function(ms, callback) {
+    setTimeout(function() { if (typeof callback === "function") callback(); }, ms || 0);
+  });
+  await luaEngine.doString("net = { connected = function() return true end }");
 
   // canvas
   await luaEngine.doString([
@@ -205,60 +245,82 @@ async function setupLua(app) {
     else if (op === "circle") { ctx.fillStyle = normColor(d || e); ctx.beginPath(); ctx.arc(a, b, c, 0, Math.PI*2); ctx.fill(); }
   });
 
-  // os.date
-  G.set("__fc_date", function(fmt) {
-    var d = new Date();
-    return fmt.replace("%%", "\0")
-      .replace("%H", String(d.getHours()).padStart(2,"0"))
-      .replace("%M", String(d.getMinutes()).padStart(2,"0"))
-      .replace("%S", String(d.getSeconds()).padStart(2,"0"))
-      .replace("%Y", String(d.getFullYear()))
-      .replace("%m", String(d.getMonth()+1).padStart(2,"0"))
-      .replace("%d", String(d.getDate()).padStart(2,"0"))
+  // os.time / os.date
+  G.set("__js_time", function(y, m, d, h, min, s) {
+    if (y === undefined) return Math.floor(Date.now() / 1000);
+    var day = (d !== undefined && d !== null) ? d : 1;
+    var date = new Date(y, (m || 1) - 1, day, h || 0, min || 0, s || 0);
+    return Math.floor(date.getTime() / 1000);
+  });
+  G.set("__js_date", function(fmt, ts) {
+    var d = ts ? new Date(ts * 1000) : new Date();
+    if (fmt === "*t") {
+      return {
+        year: d.getFullYear(), month: d.getMonth() + 1, day: d.getDate(),
+        hour: d.getHours(), min: d.getMinutes(), sec: d.getSeconds(),
+        wday: d.getDay() + 1,
+        yday: Math.floor((d - new Date(d.getFullYear(), 0, 0)) / 86400000)
+      };
+    }
+    var pad = function(n) { return n < 10 ? "0" + n : "" + n; };
+    return (fmt || "%c").replace("%%", "\0")
+      .replace("%Y", d.getFullYear()).replace("%m", pad(d.getMonth() + 1))
+      .replace("%d", pad(d.getDate())).replace("%H", pad(d.getHours()))
+      .replace("%M", pad(d.getMinutes())).replace("%S", pad(d.getSeconds()))
       .replace("%c", d.toLocaleString()).replace("\0", "%");
   });
-  await luaEngine.doString("os = os or {}; os.date = function(fmt) return __fc_date(fmt or '%c') end");
+  await luaEngine.doString(
+    "os.time = function(t)\n" +
+    "  if t == nil then return __js_time()\n" +
+    "  else return __js_time(t.year, t.month, t.day, t.hour, t.min, t.sec) end\n" +
+    "end\n" +
+    "os.date = function(fmt, ts)\n" +
+    "  if fmt == '*t' then return __js_date('*t', ts)\n" +
+    "  else return __js_date(fmt or '%c', ts) end\n" +
+    "end"
+  );
 
   // json
   G.set("__fc_json_parse", function(s) { try { return JSON.parse(s); } catch(e) { return null; } });
   G.set("__fc_json_stringify", function(t) { try { return JSON.stringify(t); } catch(e) { return "{}"; } });
   await luaEngine.doString(
-    "json = {}\n" +
-    "json.parse = function(s) return __fc_json_parse(s) end\n" +
-    "json.decode = json.parse\n" +
-    "json.stringify = function(t) return __fc_json_stringify(t) end\n" +
-    "json.encode = json.stringify"
+    "json = {}\njson.parse = function(s) return __fc_json_parse(s) end\n" +
+    "json.decode = json.parse\njson.stringify = function(t) return __fc_json_stringify(t) end\njson.encode = json.stringify"
   );
 
   // fetch
-  G.set("__fc_fetch", function(url, method, headers, body, callbackId) {
+  G.set("__js_fetch", function(url, method, body, format, fields, callback) {
     var opts = { method: method || "GET" };
-    if (headers) { try { opts.headers = JSON.parse(headers); } catch(e) {} }
-    if (body && method !== "GET") opts.body = body;
-    window.fetch(url, opts).then(function(res) {
-      return res.text().then(function(text) { return { status: res.status, body: text }; });
-    }).then(function(r) {
-      try {
-        luaEngine.doString("if __fc_pending[" + callbackId + "] then __fc_pending[" + callbackId + "]({status=" + r.status + ",body=[[" + r.body.replace(/\]\]/g, "] ]") + "]]}) end");
-      } catch(e) { clog("[fetch-cb] " + e.message, "cw"); }
+    if (body) { opts.body = body; opts.headers = { "Content-Type": "application/json" }; }
+    window.fetch(url, opts).then(function(resp) {
+      var status = resp.status, ok = status >= 200 && status < 300;
+      return resp.text().then(function(text) {
+        var result = { status: status, ok: ok, body: text };
+        if (format === "json" && text) {
+          try {
+            var json = JSON.parse(text);
+            if (fields && fields.length > 0) {
+              var filtered = {};
+              for (var i = 0; i < fields.length; i++) { var f = fields[i]; if (json[f] !== undefined) filtered[f] = json[f]; }
+              result.body = filtered;
+            } else { result.body = json; }
+          } catch(e) { result.body = text; }
+        }
+        return result;
+      });
+    }).then(function(result) {
+      if (typeof callback === "function") callback(result);
     }).catch(function(err) {
-      clog("[fetch] " + err.message, "cw");
-      try { luaEngine.doString("if __fc_pending[" + callbackId + "] then __fc_pending[" + callbackId + "]({status=0,body=''}) end"); } catch(e) {}
+      if (typeof callback === "function") callback({ status: 0, ok: false, error: err.message, body: "" });
     });
   });
   await luaEngine.doString(
-    "__fc_pending = {}\n__fc_req_id = 0\n" +
-    "fetch = function(opts, cb)\n" +
-    "  __fc_req_id = __fc_req_id + 1\n" +
-    "  local id = __fc_req_id\n" +
-    "  __fc_pending[id] = cb\n" +
-    "  local h = ''\n" +
-    "  if opts.headers then h = json.encode(opts.headers) end\n" +
-    "  __fc_fetch(opts.url, opts.method or 'GET', h, opts.body or '', id)\n" +
-    "end"
+    "function fetch(opts, callback)\n" +
+    "  local url = opts.url or ''\n  local method = opts.method or 'GET'\n" +
+    "  local body = opts.body\n  local format = opts.format\n  local fields = opts.fields or {}\n" +
+    "  __js_fetch(url, method, body, format, fields, callback)\nend"
   );
 
-  // Run user script
   var se = app.querySelector("script");
   if (se && se.textContent && se.textContent !== "X") {
     try { await luaEngine.doString(luaPreprocess(se.textContent)); clog("Script OK", "ci"); }
@@ -269,24 +331,16 @@ async function setupLua(app) {
 // ======================== XML PARSER ========================
 var SCRIPT_OPEN = "<" + "script";
 var SCRIPT_CLOSE = "</" + "script>";
-
 function parseXML(src) {
   var luaCode = "";
   var i1 = src.indexOf(SCRIPT_OPEN);
   if (i1 >= 0) {
     var i2 = src.indexOf(SCRIPT_CLOSE, i1);
-    if (i2 > i1) {
-      var tagEnd = src.indexOf(">", i1);
-      luaCode = src.substring(tagEnd + 1, i2);
-      src = src.substring(0, tagEnd + 1) + "X" + src.substring(i2);
-    }
+    if (i2 > i1) { var tagEnd = src.indexOf(">", i1); luaCode = src.substring(tagEnd + 1, i2); src = src.substring(0, tagEnd + 1) + "X" + src.substring(i2); }
   }
   var selfClose = ["bluetooth","timer","string","int","bool","float","image","slider","switch","input"];
   var scRe = new RegExp("<(" + selfClose.join("|") + ")\\b([^>]*?)\\/?\\s*>", "g");
-  src = src.replace(scRe, function(m, t, a) {
-    if (m.charAt(m.length - 2) === "/") return m;
-    return "<" + t + a + "/>";
-  });
+  src = src.replace(scRe, function(m, t, a) { if (m.charAt(m.length - 2) === "/") return m; return "<" + t + a + "/>"; });
   var doc = new DOMParser().parseFromString(src, "text/xml");
   var err = doc.querySelector("parsererror");
   if (err) { clog("[xml-err] " + err.textContent.substring(0, 200), "ce"); throw new Error("XML parse error"); }
@@ -297,7 +351,6 @@ function parseXML(src) {
 
 // ======================== CSS ENGINE ========================
 var cssRules = [];
-
 function parseAppCSS(app) {
   cssRules = [];
   var styleEl = app.querySelector("style");
@@ -321,7 +374,6 @@ function parseAppCSS(app) {
   }
   cssRules.sort(function(a, b) { return a.sp - b.sp; });
 }
-
 function matchCSS(tagName, classList) {
   var result = {}; tagName = tagName.toLowerCase();
   for (var i = 0; i < cssRules.length; i++) {
@@ -334,13 +386,12 @@ function matchCSS(tagName, classList) {
   }
   return result;
 }
-
 function applyCSSProps(el, props) {
   if (!el._cssP) el._cssP = {};
   for (var key in props) {
     var v = props[key];
     switch (key) {
-      case "background": case "bgcolor": el.style.backgroundColor = normColor(v); el._cssP.backgroundColor = 1; break;
+      case "background": case "bgcolor": case "background-color": el.style.background = normColor(v); el._cssP.background = 1; break;
       case "color": el.style.color = normColor(v); el._cssP.color = 1; break;
       case "font-size": case "font": el.style.fontSize = /^\d+$/.test(v)?v+"px":v; el._cssP.fontSize = 1; break;
       case "border-radius": case "radius": el.style.borderRadius = /^\d+$/.test(v)?v+"px":v; el._cssP.borderRadius = 1; break;
@@ -356,9 +407,9 @@ function applyCSSProps(el, props) {
     }
   }
 }
-
 function getClassList(xml) {
   var c = xml.getAttribute("class") || "";
+  if (c.indexOf("{") >= 0) c = resolve(c);
   return c ? c.split(/\s+/).filter(function(s){return s;}) : [];
 }
 function applyDynamicClass(el, xml, tagName) {
@@ -370,6 +421,7 @@ function applyDynamicClass(el, xml, tagName) {
     applyCSSProps(el, matchCSS(tagName, cls));
   };
   for (var i = 0; i < vars.length; i++) sub(vars[i], fn);
+  fn();
 }
 
 // ======================== VALIDATION ========================
@@ -393,10 +445,24 @@ window.validateCode = function(xmlStr) {
     ["onclick","onchange","onenter","onblur","onhold","call"].forEach(function(a){ var f = el.getAttribute(a); if(f) usedH[f]=true; });
   }
   for (var v in usedB) if (!stateVars[v]) warnings.push({code:"UNBOUND",msg:"{"+v+"} not in <state>"});
+  var allButtons = app.querySelectorAll("button");
+  for (var i = 0; i < allButtons.length; i++) {
+    var btn = allButtons[i], nested = btn.querySelectorAll("label");
+    if (nested.length > 1) {
+      var btnId = btn.getAttribute("id") || btn.getAttribute("onclick") || ("button #"+(i+1));
+      warnings.push({code:"MULTI_LABEL", msg:"<button "+btnId+"> has "+nested.length+" nested <label>"});
+    }
+  }
   var se = app.querySelector("script"), lc = se ? se.textContent : "", lf = {};
   var m2, re2 = /function\s+([a-zA-Z_]\w*)\s*\(/g;
   while ((m2 = re2.exec(lc)) !== null) lf[m2[1]] = true;
   for (var fn in usedH) if (!lf[fn]) errors.push({code:"MISSING_FUNC",msg:fn+" not found"});
+  var emojiRegex = /[\u{1F300}-\u{1F9FF}]|[\u{2600}-\u{26FF}]|[\u{2700}-\u{27BF}]|[\u{FE00}-\u{FE0F}]|[\u{1F000}-\u{1F02F}]|[\u{1F0A0}-\u{1F0FF}]|[\u25B6\u25C0\u23F8-\u23FA]/gu;
+  var emojiMatches = xmlStr.match(emojiRegex);
+  if (emojiMatches) {
+    var unique = Array.from(new Set(emojiMatches));
+    errors.push({code:"EMOJI", msg:"Unicode emoji unsupported: " + unique.slice(0,5).join(" ")});
+  }
   return {valid:!errors.length, errors:errors, warnings:warnings,
     stats:{pages:Object.keys(pageIds).length, stateVars:Object.keys(stateVars).length, functions:Object.keys(lf).length}};
 };
@@ -407,41 +473,42 @@ async function buildApp(xmlStr) {
   groupDefaults = {}; groupPages = {}; groupOrient = {}; pageToGroup = {};
   currentPage = null;
   activeTimers.forEach(function(t){clearInterval(t);}); activeTimers = [];
+  window._appOnclicks = [];
   var screen = document.getElementById("screen");
   document.getElementById("load-screen").style.display = "none";
   var old = screen.querySelectorAll(".fc-page,.fc-dots");
   for (var i = 0; i < old.length; i++) old[i].remove();
-
   clog("Parsing...", "ci");
   var app = parseXML(xmlStr);
   parseAppCSS(app);
-
+  var emojiRegex = /[\u{1F300}-\u{1F9FF}]|[\u{2600}-\u{26FF}]|[\u{2700}-\u{27BF}]|[\u{FE00}-\u{FE0F}]|[\u{1F000}-\u{1F02F}]|[\u{1F0A0}-\u{1F0FF}]|[\u25B6\u25C0\u23F8-\u23FA]/gu;
+  var emojiMatches = xmlStr.match(emojiRegex);
+  if (emojiMatches) {
+    var unique = Array.from(new Set(emojiMatches));
+    clog("[error] Unicode emoji unsupported: " + unique.slice(0,5).join(" "), "ce");
+  }
   var stateEl = app.querySelector("state");
   if (stateEl) {
     var ch = stateEl.children;
     for (var i = 0; i < ch.length; i++) {
       var name = ch[i].getAttribute("name"), def = ch[i].getAttribute("default") || "";
-      appState["_" + name] = def;
       stateTypes[name] = ch[i].tagName.toLowerCase();
+      appState["_" + name] = coerceState(name, def);
     }
     clog("State: " + ch.length + " vars", "ci");
   }
-
   var uiEl = app.querySelector("ui");
   var defaultPage = uiEl ? (uiEl.getAttribute("default") || "").replace(/^\//, "") : "";
-
   function processContainer(container) {
     var ch = container.children;
     for (var i = 0; i < ch.length; i++) {
       var tag = ch[i].tagName.toLowerCase();
       if (tag === "page") {
         var pid = ch[i].getAttribute("id");
-        var div = document.createElement("div");
-        div.className = "fc-page"; div.id = "page-" + pid;
+        var div = document.createElement("div"); div.className = "fc-page"; div.id = "page-" + pid;
         div.style.background = normColor(ch[i].getAttribute("bgcolor")) || "#000";
         screen.appendChild(div); pages[pid] = div;
-        buildWidgets(ch[i], div);
-        clog("Page: " + pid, "ci");
+        buildWidgets(ch[i], div); clog("Page: " + pid, "ci");
       } else if (tag === "group") {
         var gid = ch[i].getAttribute("id");
         var orient = ch[i].getAttribute("orientation") || "horizontal";
@@ -456,7 +523,6 @@ async function buildApp(xmlStr) {
         }
         processContainer(ch[i]);
         if (gid && !groupDefaults[gid] && groupPages[gid].length) groupDefaults[gid] = groupPages[gid][0];
-        // Dots indicator
         var indicator = ch[i].getAttribute("indicator") || "scrollbar";
         if (indicator === "dots" && gid && groupPages[gid].length > 1) {
           var dd = document.createElement("div"); dd.className = "fc-dots"; dd.id = "dots-" + gid;
@@ -473,17 +539,14 @@ async function buildApp(xmlStr) {
   }
   if (uiEl) processContainer(uiEl);
   setupGroupSwipe(screen);
-
   var startPage = defaultPage || Object.keys(pages)[0] || "";
   clog("Start: " + startPage, "ci");
   if (startPage) navigateTo(startPage);
-
   if (luaReady) {
     if (luaEngine) try { luaEngine.global.close(); } catch(e) {}
     luaEngine = await new wasmoon.LuaFactory().createEngine();
     await setupLua(app);
   }
-
   var timerEls = app.querySelectorAll("timer");
   for (var i = 0; i < timerEls.length; i++) {
     var iv = parseInt(timerEls[i].getAttribute("interval")) || 1000;
@@ -500,8 +563,7 @@ function setupGroupSwipe(screen) {
     if (!currentPage) return;
     var gid = pageToGroup[currentPage]; if (!gid) return;
     var plist = groupPages[gid], orient = groupOrient[gid], idx = plist.indexOf(currentPage);
-    if (idx < 0) return;
-    var T = 50;
+    if (idx < 0) return; var T = 50;
     if (orient === "h") {
       if (Math.abs(dx) < T || Math.abs(dy) > Math.abs(dx)) return;
       if (dx < 0 && idx < plist.length-1) navigateTo(plist[idx+1]);
@@ -518,7 +580,7 @@ function setupGroupSwipe(screen) {
   screen.addEventListener("mouseup", function(e) { if (!active) return; active=false; handleSwipe(e.clientX-sx, e.clientY-sy); });
 }
 
-// ======================== WIDGET BUILDERS ========================
+// ======================== WIDGETS ========================
 function buildWidgets(pageXml, pageDom) {
   var ch = pageXml.children;
   for (var i = 0; i < ch.length; i++) {
@@ -543,6 +605,8 @@ function applyGeometry(el, xml) {
   if (h) el.style.height = normUnit(h);
   var r = xml.getAttribute("radius");
   if (r !== null && r !== undefined) el.style.borderRadius = /^\d+$/.test(r) ? r+"px" : r;
+  var z = xml.getAttribute("z") || xml.getAttribute("zindex") || xml.getAttribute("z-index");
+  if (z) el.style.zIndex = z;
   var al = xml.getAttribute("align"), va = xml.getAttribute("valign");
   if (al) {
     var p = al.split(/\s+/);
@@ -592,7 +656,7 @@ function applyColor(el, xml, attr, prop) {
   var v = xml.getAttribute(attr); if (!v) return;
   if (v.charAt(0)==="{" && v.charAt(v.length-1)==="}") {
     var vn = v.substring(1, v.length-1);
-    var fn = function() { var c = getState(vn); if (c) el.style[prop] = normColor(c); };
+    var fn = function() { var c = getStateStr(vn); if (c) el.style[prop] = normColor(c); };
     sub(vn, fn); fn();
   } else el.style[prop] = normColor(v);
 }
@@ -600,7 +664,7 @@ function applyVisible(el, xml) {
   var v = xml.getAttribute("visible"); if (!v) return;
   if (v.charAt(0)==="{" && v.charAt(v.length-1)==="}") {
     var vn = v.substring(1, v.length-1);
-    var fn = function() { var s = getState(vn); el.classList.toggle("fc-hidden", s!=="true" && s!=="1"); };
+    var fn = function() { var s = getStateStr(vn); el.classList.toggle("fc-hidden", s!=="true" && s!=="1"); };
     sub(vn, fn); fn();
   }
 }
@@ -628,25 +692,22 @@ function applyOverflow(el, xml) {
     inner.textContent = t+"   "+t; el.appendChild(inner); el._scrollInner = inner;
   }
 }
-
-// LABEL
 function buildLabel(xml, parent) {
   var el = document.createElement("div"); el.className = "fc-label";
   var id = xml.getAttribute("id"); if (id) widgets[id] = el;
   applyCSSProps(el, matchCSS("label", getClassList(xml)));
   applyGeometry(el,xml); applyFont(el,xml); applyTextAlign(el,xml);
-  applyColor(el,xml,"color","color"); applyColor(el,xml,"bgcolor","backgroundColor");
+  applyColor(el,xml,"color","color"); applyColor(el,xml,"bgcolor","background");
   applyVisible(el,xml); applyText(el,xml); applyOverflow(el,xml);
   applyDynamicClass(el,xml,"label"); parent.appendChild(el);
 }
-
-// BUTTON
 function buildButton(xml, parent) {
   var el = document.createElement("div"); el.className = "fc-button";
   var id = xml.getAttribute("id"); if (id) widgets[id] = el;
+  el.style.background = "#333";
   applyCSSProps(el, matchCSS("button", getClassList(xml)));
   applyGeometry(el,xml); applyFont(el,xml); applyTextAlign(el,xml);
-  applyColor(el,xml,"bgcolor","backgroundColor"); applyColor(el,xml,"color","color");
+  applyColor(el,xml,"bgcolor","background"); applyColor(el,xml,"color","color");
   applyVisible(el,xml); applyText(el,xml);
   var iconSrc = xml.getAttribute("icon");
   if (iconSrc) {
@@ -657,8 +718,10 @@ function buildButton(xml, parent) {
     el.insertBefore(img, el.firstChild);
   }
   var oc = xml.getAttribute("onclick"), hr = xml.getAttribute("href"), oh = xml.getAttribute("onhold");
+  if (oc) { el.dataset.onclick = oc; if (!window._appOnclicks) window._appOnclicks = []; if (window._appOnclicks.indexOf(oc) === -1) window._appOnclicks.push(oc); }
   var holdFired = false, holdTimer = null;
   if (oh) {
+    el.dataset.onhold = oh;
     el.addEventListener("pointerdown", function() { holdFired=false; holdTimer=setTimeout(function(){holdFired=true;callLua(oh);holdTimer=null;},500); });
     el.addEventListener("pointerup", function() { if(holdTimer){clearTimeout(holdTimer);holdTimer=null;} });
     el.addEventListener("pointerleave", function() { if(holdTimer){clearTimeout(holdTimer);holdTimer=null;} });
@@ -669,30 +732,27 @@ function buildButton(xml, parent) {
   });
   applyDynamicClass(el,xml,"button"); parent.appendChild(el);
 }
-
-// INPUT
 function buildInput(xml, parent) {
   var el = document.createElement("input"); el.className = "fc-input";
   el.type = xml.getAttribute("password")==="true" ? "password" : "text";
   var id = xml.getAttribute("id"); if (id) widgets[id] = el;
   applyCSSProps(el, matchCSS("input", getClassList(xml)));
   applyGeometry(el,xml); applyVisible(el,xml);
-  applyColor(el,xml,"color","color"); applyColor(el,xml,"bgcolor","backgroundColor");
+  applyColor(el,xml,"color","color"); applyColor(el,xml,"bgcolor","background");
   var ph = xml.getAttribute("placeholder"); if (ph) el.placeholder = ph;
   var bind = xml.getAttribute("bind");
   if (bind) {
-    var fn = function() { if (document.activeElement!==el) el.value = getState(bind); };
+    var fn = function() { if (document.activeElement!==el) el.value = getStateStr(bind); };
     sub(bind, fn); fn();
     el.addEventListener("input", function() { setState(bind, el.value); });
   }
   var onenter = xml.getAttribute("onenter");
-  if (onenter) el.addEventListener("keydown", function(e) { if (e.key==="Enter") { e.preventDefault(); el.blur(); callLua(onenter); } });
+  if (onenter) { el.dataset.onenter = onenter; el.addEventListener("keydown", function(e) { if (e.key==="Enter") { e.preventDefault(); el.blur(); callLua(onenter); } }); }
   var onblur = xml.getAttribute("onblur"), onchange = xml.getAttribute("onchange");
+  if (onblur) el.dataset.onblur = onblur;
   el.addEventListener("blur", function() { if (onchange) callLua(onchange); if (onblur) callLua(onblur); });
   applyDynamicClass(el,xml,"input"); parent.appendChild(el);
 }
-
-// SLIDER
 function buildSlider(xml, parent) {
   var el = document.createElement("input"); el.className = "fc-slider"; el.type = "range";
   var id = xml.getAttribute("id"); if (id) widgets[id] = el;
@@ -701,15 +761,13 @@ function buildSlider(xml, parent) {
   el.min = xml.getAttribute("min")||"0"; el.max = xml.getAttribute("max")||"100";
   var bind = xml.getAttribute("bind");
   if (bind) {
-    var fn = function() { el.value = getState(bind)||"0"; }; sub(bind,fn); fn();
+    var fn = function() { el.value = getStateStr(bind)||"0"; }; sub(bind,fn); fn();
     el.addEventListener("input", function() { setState(bind, el.value); });
   }
   var onchange = xml.getAttribute("onchange");
   if (onchange) el.addEventListener("input", function() { callLua(onchange); });
   parent.appendChild(el);
 }
-
-// SWITCH
 function buildSwitch(xml, parent) {
   var el = document.createElement("button"); el.className = "fc-switch";
   var id = xml.getAttribute("id"); if (id) widgets[id] = el;
@@ -719,18 +777,22 @@ function buildSwitch(xml, parent) {
   if (!xml.getAttribute("h")) el.style.height = "26px";
   var bind = xml.getAttribute("bind"), onchange = xml.getAttribute("onchange");
   function render() {
-    var on = bind ? (getState(bind)==="true") : false;
+    var val = getState(bind);
+    var on = (val === true) || (val === "true") || (val === "1");
     el.style.background = on?"#4caf50":"#555"; el.style.borderRadius = "13px";
     el.innerHTML = '<div style="width:22px;height:22px;background:#fff;border-radius:50%;position:absolute;top:2px;left:'+(on?"26px":"2px")+';transition:left 0.15s"></div>';
   }
   if (bind) {
     sub(bind, render); render();
-    el.addEventListener("click", function() { setState(bind, getState(bind)==="true"?"false":"true"); if (onchange) callLua(onchange); });
+    el.addEventListener("click", function() {
+      var val = getState(bind);
+      var isOn = (val === true) || (val === "true") || (val === "1");
+      setState(bind, isOn ? "false" : "true");
+      if (onchange) callLua(onchange);
+    });
   }
   applyVisible(el,xml); parent.appendChild(el);
 }
-
-// IMAGE
 function buildImage(xml, parent) {
   var el = document.createElement("img"); el.style.position = "absolute"; el.style.objectFit = "contain";
   var id = xml.getAttribute("id"); if (id) widgets[id] = el;
@@ -740,8 +802,6 @@ function buildImage(xml, parent) {
   el.onerror = function() { el.style.display="none"; };
   parent.appendChild(el);
 }
-
-// CANVAS
 function buildCanvas(xml, parent) {
   var el = document.createElement("canvas"); el.style.position = "absolute";
   var id = xml.getAttribute("id"); if (id) widgets[id] = el;
@@ -771,6 +831,48 @@ function navigateTo(target) {
   showPage(c);
 }
 
+// ======================== AUTO-TEST ========================
+var autoTestErrors = [];
+function runAutoTest() {
+  if (!luaReady) return { success: false, error: "Lua not ready" };
+  autoTestErrors = [];
+  var handlers = new Map();
+  var activePage = document.querySelector(".fc-page.active") || document.querySelector(".fc-page");
+  var allW = activePage ? activePage.querySelectorAll("*") : document.querySelectorAll(".fc-button,.fc-label,.fc-input,.fc-switch,.fc-slider");
+  allW.forEach(function(el) {
+    ["onclick","onchange","onenter","onhold","onblur"].forEach(function(ev) {
+      var fn = el.dataset[ev];
+      if (fn && fn.trim()) {
+        if (!handlers.has(fn)) handlers.set(fn, { types: [], elements: [] });
+        handlers.get(fn).types.push(ev);
+        handlers.get(fn).elements.push(el.id || el.className);
+      }
+    });
+  });
+  if (window._appOnclicks) window._appOnclicks.forEach(function(fn) {
+    if (!handlers.has(fn)) handlers.set(fn, { types: ["onclick"], elements: ["registered"] });
+  });
+  var results = [], tested = 0;
+  handlers.forEach(function(info, fn) {
+    try {
+      var f = luaEngine.global.get(fn);
+      if (typeof f === "function") {
+        if (info.types.includes("onclick") || info.types.includes("onenter") || info.types.includes("onhold")) f();
+        results.push({ func: fn, status: "ok", types: info.types }); tested++;
+      } else {
+        var msg = "'" + fn + "' not found in Lua";
+        results.push({ func: fn, status: "error", message: msg }); autoTestErrors.push(msg);
+      }
+    } catch(err) {
+      var msg = fn + "(): " + err.message;
+      results.push({ func: fn, status: "error", message: msg }); autoTestErrors.push(msg);
+    }
+  });
+  return { success: autoTestErrors.length === 0, tested: tested, totalHandlers: handlers.size, errors: autoTestErrors, results: results };
+}
+window.runAutoTest = runAutoTest;
+window.getAutoTestErrors = function() { return autoTestErrors; };
+
 // ======================== LOAD ========================
 document.getElementById("run-btn").addEventListener("click", function() {
   var src = document.getElementById("app-source").value.trim();
@@ -792,9 +894,22 @@ factory.createEngine().then(function(engine) {
   clog("Lua ready!", "ci");
   document.getElementById("lua-status").textContent = "Lua ready!";
   if (window.location.pathname === '/app') {
+    var autoTest = new URLSearchParams(window.location.search).get("autotest") === "1";
     window.fetch('/app/code').then(function(res){if(res.ok)return res.text();return null;}).then(function(code) {
-      if (code) { clog("Auto-loading app...","ci"); buildApp(code).catch(function(e){clog("[auto-err] "+e.message,"ce");}); }
-      else clog("No app loaded.","cw");
+      if (code) {
+        clog("Auto-loading app...","ci");
+        buildApp(code).then(function() {
+          if (autoTest) {
+            clog("[autotest] Starting...", "ci");
+            setTimeout(function() {
+              var result = runAutoTest();
+              if (result.success) clog("[autotest] PASS: " + result.tested + " functions tested", "ci");
+              else { result.errors.forEach(function(e){clog("[autotest-error] "+e,"ce");}); clog("[autotest] FAIL: "+result.errors.length+" errors","ce"); }
+              clog("[autotest-done] " + JSON.stringify(result), "ci");
+            }, 500);
+          }
+        }).catch(function(e){clog("[auto-err] "+e.message,"ce");});
+      } else clog("No app loaded.","cw");
     }).catch(function(){clog("No app loaded","cw");});
   }
 }).catch(function(err) {

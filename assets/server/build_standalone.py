@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Собирает standalone.html из runtime.html + wasmoon.js + glue.wasm
+Собирает standalone.html из runtime.html + runtime.js + wasmoon.js + glue.wasm
 
 Использование:
   python build_standalone.py
@@ -30,18 +30,28 @@ def build():
     # Читаем runtime.html
     html = read_file('runtime.html')
     
+    # Читаем runtime.js
+    runtime_js = read_file('runtime.js')
+    print(f"  runtime.js: {len(runtime_js)} chars")
+    
     # Читаем wasmoon.js
     wasmoon_js = read_file('wasmoon.js')
+    print(f"  wasmoon.js: {len(wasmoon_js)} chars")
     
     # Читаем и кодируем glue.wasm
     wasm_bytes = read_binary('glue.wasm')
     wasm_b64 = base64.b64encode(wasm_bytes).decode('ascii')
     print(f"  glue.wasm: {len(wasm_bytes)} bytes → {len(wasm_b64)} base64")
     
-    # Встраиваем wasmoon.js inline (простая замена без regex)
-    old_script = '<script src="wasmoon.js" onerror="document.getElementById(\'lua-status\').textContent=\'wasmoon.js not found\'"></script>'
-    new_script = f'<script>\n// === wasmoon.js (inlined) ===\n{wasmoon_js}\n</script>'
-    html = html.replace(old_script, new_script)
+    # Встраиваем runtime.js inline
+    old_runtime = '<script src="runtime.js"></script>'
+    new_runtime = f'<script>\n// === runtime.js (inlined) ===\n{runtime_js}\n</script>'
+    html = html.replace(old_runtime, new_runtime)
+    
+    # Встраиваем wasmoon.js inline
+    old_wasmoon = '<script src="wasmoon.js" onerror="document.getElementById(\'lua-status\').textContent=\'wasmoon.js not found\'"></script>'
+    new_wasmoon = f'<script>\n// === wasmoon.js (inlined) ===\n{wasmoon_js}\n</script>'
+    html = html.replace(old_wasmoon, new_wasmoon)
     
     # Добавляем загрузчик wasm из base64 перед wasmoon
     wasm_loader = f'''<script>
@@ -110,15 +120,17 @@ document.getElementById("validate-btn").addEventListener("click", function(e) {
     
     # Меняем title
     html = html.replace('<title>FutureClock Web Runtime</title>', 
-                        '<title>Evolution OS Runtime (Standalone)</title>')
+                        '<title>TelaOS Runtime (Standalone)</title>')
     
-    # Сохраняем
-    out_path = os.path.join(SCRIPT_DIR, 'standalone.html')
+    # Сохраняем в build/
+    build_dir = os.path.join(SCRIPT_DIR, '..', '..', 'build')
+    os.makedirs(build_dir, exist_ok=True)
+    out_path = os.path.join(build_dir, 'standalone.html')
     with open(out_path, 'w', encoding='utf-8') as f:
         f.write(html)
     
     size_kb = len(html) / 1024
-    print(f"✅ Created: standalone.html ({size_kb:.1f} KB)")
+    print(f"✅ Created: build/standalone.html ({size_kb:.1f} KB)")
     print("   Open in browser - no server needed!")
 
 if __name__ == '__main__':
