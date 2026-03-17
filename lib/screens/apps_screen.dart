@@ -68,6 +68,30 @@ String _appFileName(String name) => '$name.$_appExtension';
 /// Генерация полного пути: calc -> calc/calc.bax  
 String _appFilePath(String name) => '$name/${_appFileName(name)}';
 
+/// Таблица транслитерации кириллицы
+const _translitMap = {
+  'а': 'a', 'б': 'b', 'в': 'v', 'г': 'g', 'д': 'd', 'е': 'e', 'ё': 'yo',
+  'ж': 'zh', 'з': 'z', 'и': 'i', 'й': 'y', 'к': 'k', 'л': 'l', 'м': 'm',
+  'н': 'n', 'о': 'o', 'п': 'p', 'р': 'r', 'с': 's', 'т': 't', 'у': 'u',
+  'ф': 'f', 'х': 'h', 'ц': 'ts', 'ч': 'ch', 'ш': 'sh', 'щ': 'sch', 'ъ': '',
+  'ы': 'y', 'ь': '', 'э': 'e', 'ю': 'yu', 'я': 'ya',
+};
+
+/// Нормализация имени для push: "Moon Calendar" -> "moon", "Лунный календарь" -> "lunnyy"
+String _normalizeAppName(String name) {
+  // Берём только первое слово
+  final firstWord = name.trim().split(RegExp(r'\s+')).first;
+  
+  // Транслитерация кириллицы
+  final buffer = StringBuffer();
+  for (final char in firstWord.toLowerCase().split('')) {
+    buffer.write(_translitMap[char] ?? char);
+  }
+  
+  // Убираем все не-ASCII символы, оставляем только a-z, 0-9, _
+  return buffer.toString().replaceAll(RegExp(r'[^a-z0-9_]'), '');
+}
+
 class AppsScreen extends StatefulWidget {
   const AppsScreen({super.key});
 
@@ -1055,6 +1079,32 @@ class _EditorPageState extends State<_EditorPage> with SingleTickerProviderState
     
     // Прогреваем headless WebView для быстрого тестирования
     HeadlessTestService().warmup();
+    
+    // Проверяем доступность промптов
+    _checkPrompts();
+  }
+  
+  Future<void> _checkPrompts() async {
+    try {
+      final assetManifest = await AssetManifest.loadFromAssetBundle(rootBundle);
+      final allAssets = assetManifest.listAssets();
+      
+      // Проверяем основные файлы
+      final hasSystem = allAssets.contains('assets/prompts/system.md');
+      final hasRules = allAssets.contains('assets/prompts/rules.md');
+      
+      // Находим примеры
+      final examples = allAssets
+          .where((key) => key.startsWith('assets/prompts/examples/') && key.endsWith('.bax'))
+          .map((e) => e.split('/').last)
+          .toList()
+        ..sort();
+      
+      debugPrint('[AI] Prompts: system.md=${hasSystem ? "✓" : "✗"}, rules.md=${hasRules ? "✓" : "✗"}');
+      debugPrint('[AI] Examples (${examples.length}): ${examples.join(", ")}');
+    } catch (e) {
+      debugPrint('[AI] Failed to check prompts: $e');
+    }
   }
   
   void _onNameChanged() {
@@ -1243,6 +1293,12 @@ class _EditorPageState extends State<_EditorPage> with SingleTickerProviderState
     final code = _contentController.text;
     if (code.isEmpty) return;
     
+    // Пропускаем проверку если код не изменён
+    if (!_isModified) {
+      _runInEmulator();
+      return;
+    }
+    
     setState(() => _checkingBeforeRun = true);
     
     try {
@@ -1350,6 +1406,15 @@ ${result.errorContext ?? 'нет данных'}
       return;
     }
 
+    // Нормализуем имя для push: первое слово, lowercase, транслитерация
+    final pushName = _normalizeAppName(name);
+    if (pushName.isEmpty) {
+      setState(() => _error = 'Некорректное имя приложения');
+      return;
+    }
+    
+    debugPrint('[Push] "$name" -> "$pushName"');
+
     setState(() {
       _pushing = true;
       _error = null;
@@ -1360,12 +1425,12 @@ ${result.errorContext ?? 'нет данных'}
 
     if (!mounted) return;
     final ble = context.read<BleService>();
-    final ok = await ble.pushFile(name, _appFileName(name), content);
+    final ok = await ble.pushFile(pushName, _appFileName(pushName), content);
 
     if (mounted) {
       setState(() => _pushing = false);
       if (ok) {
-        _showNotification('${_appFilePath(name)} загружен ✓');
+        _showNotification('${_appFilePath(pushName)} загружен ✓');
         Navigator.pop(context);
       } else {
         setState(() => _error = 'Ошибка отправки');
@@ -1546,21 +1611,42 @@ ${result.errorContext ?? 'нет данных'}
       
       // Загружаем промпты из файлов
       String systemPrompt;
+      var examplesCount = 0;
       try {
         final system = await rootBundle.loadString('assets/prompts/system.md');
         final rules = await rootBundle.loadString('assets/prompts/rules.md');
+        debugPrint('[AI] system.md: ${system.length} bytes');
+        debugPrint('[AI] rules.md: ${rules.length} bytes');
         
-        // Загружаем примеры
+        // Загружаем все примеры из папки examples/
         final examples = StringBuffer();
-        for (final name in ['calc.xml', 'counter.xml', 'timer.xml', 'weather.xml']) {
-          try {
-            final content = await rootBundle.loadString('assets/prompts/$name');
-            examples.writeln('\n### Пример: $name\n```xml\n$content\n```');
-          } catch (_) {}
+        try {
+          final assetManifest = await AssetManifest.loadFromAssetBundle(rootBundle);
+          final allAssets = assetManifest.listAssets();
+          final exampleFiles = allAssets
+              .where((key) => key.startsWith('assets/prompts/examples/') && key.endsWith('.bax'))
+              .toList()
+            ..sort();
+          
+          debugPrint('[AI] Found ${exampleFiles.length} examples: ${exampleFiles.map((e) => e.split('/').last).join(', ')}');
+          
+          for (final path in exampleFiles) {
+            try {
+              final content = await rootBundle.loadString(path);
+              final name = path.split('/').last;
+              examples.writeln('\n### Пример: $name\n```xml\n$content\n```');
+              examplesCount++;
+            } catch (e) {
+              debugPrint('[AI] Failed to load $path: $e');
+            }
+          }
+        } catch (e) {
+          debugPrint('[AI] Failed to load manifest: $e');
         }
         
         systemPrompt = '$system\n\n$rules\n\n## ПРИМЕРЫ\n${examples.toString()}';
       } catch (e) {
+        debugPrint('[AI] Failed to load prompts: $e');
         systemPrompt = 'Ты помогаешь создавать приложения. Код: <app version="1.0" os="1.0">...</app>';
       }
       
@@ -1590,7 +1676,18 @@ ${result.errorContext ?? 'нет данных'}
         return m;
       }).toList();
 
+      // Логируем что отправляем (без API ключа!)
+      final providerName = provider['provider'] ?? 'unknown';
+      final modelName = provider['model'] ?? 'default';
+      debugPrint('[AI] === Sending to $providerName ($modelName) ===');
+      debugPrint('[AI] System prompt: ${systemPrompt.length} bytes ($examplesCount examples)');
+      debugPrint('[AI] Messages: ${messagesForAi.length}');
+      debugPrint('[AI] User message: ${expandedText.length} bytes');
+      debugPrint('[AI] Context: ${context.length > 0 ? "yes (${context.length} bytes)" : "no"}');
+
       final response = await _callAiApi(provider, systemPrompt, messagesForAi);
+      
+      debugPrint('[AI] Response: ${response.length} bytes');
       
       if (mounted && !_chatCancelled) {
         _longWaitTimer?.cancel();

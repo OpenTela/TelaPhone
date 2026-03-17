@@ -1,0 +1,408 @@
+<app title="Crossword" version="1.2" category="game" icon="system:puzzle-game">
+  <templates>
+    <template id="Cell">
+      <td><button id="c{r}{c}" onclick="doTap({r},{c})" class="cell">{v{r}{c}}</button></td>
+    </template>
+    <template id="Key">
+      <td><button onclick="addLetter('{letter}')" class="key">{letter}</button></td>
+    </template>
+  </templates>
+
+  <ui default="/main">
+    <page id="main" bgcolor="#000">
+      <!-- Попап подсказки -->
+      <label id="popup" x="10%" y="35%" w="80%" h="60" bgcolor="#ff9500" radius="8" z-index="100"
+             text-align="center center" color="#000" font="32" visible="{showPopup}">{popupText}</label>
+
+      <!-- Определение -->
+      <label x="2%" y="1%" w="96%" h="36" bgcolor="#1c1c1c"/>
+      <label x="4%" y="2%" w="10%" color="#ff9500" font="16">{dir}</label>
+      <label x="14%" y="2%" w="84%" color="#fff" font="16">{hint}</label>
+
+      <!-- Сетка 5x5 -->
+      <table x="3%" y="10%" w="94%" h="60%" cellspacing="3" bgcolor="#000">
+        @for(r in 0..4) {
+          <tr>
+            @for(c in 0..4) {
+              <Cell r="{r}" c="{c}"/>
+            }
+          </tr>
+        }
+      </table>
+
+      <!-- Клавиатура: ряд 1 -->
+      <table x="2%" y="72%" w="96%" h="12%" cellspacing="4">
+        <tr>
+          <Key letter="А"/>  <Key letter="Е"/>  <Key letter="И"/>
+          <Key letter="О"/>  <Key letter="У"/>  <Key letter="К"/>
+          <Key letter="Т"/>
+          <td><button id="hintBtn" onclick="showHint" class="hint-btn" bgcolor="{hintBtnColor}">?</button></td>
+        </tr>
+      </table>
+
+      <!-- Клавиатура: ряд 2 -->
+      <table x="2%" y="85%" w="96%" h="12%" cellspacing="4">
+        <tr>
+          <Key letter="Л"/>  <Key letter="Н"/>  <Key letter="Р"/>
+          <Key letter="С"/>  <Key letter="М"/>  <Key letter="В"/>
+          <Key letter="Д"/>
+          <td><button onclick="nextWord" class="next-btn">...</button></td>
+        </tr>
+      </table>
+    </page>
+
+    <page id="win" bgcolor="#000">
+      <label align="center" y="30%" color="#4caf50" font="48">!</label>
+      <label align="center" y="50%" color="#fff" font="32">Победа!</label>
+      <label align="center" y="65%" color="#888" font="16">Все слова разгаданы</label>
+      <button x="20%" y="80%" onclick="restart" w="60%" h="50" bgcolor="#ff9500">Заново</button>
+    </page>
+  </ui>
+
+  <style>
+    button { color: #fff; }
+    .cell { bgcolor: #333; width: 100%; height: 100%; radius: 0; }
+    .key { bgcolor: #505050; width: 100%; height: 100%; }
+    .hint-btn { color: #000; width: 100%; height: 100%; }
+    .next-btn { bgcolor: #ff9500; width: 100%; height: 100%; }
+  </style>
+
+  <state>
+    <string name="dir" default=">"/>
+    <string name="hint" default="Цветок"/>
+    <string name="v00" default=""/><string name="v01" default=""/><string name="v02" default=""/><string name="v03" default=""/><string name="v04" default=""/>
+    <string name="v10" default=""/><string name="v11" default=""/><string name="v12" default=""/><string name="v13" default=""/><string name="v14" default=""/>
+    <string name="v20" default=""/><string name="v21" default=""/><string name="v22" default=""/><string name="v23" default=""/><string name="v24" default=""/>
+    <string name="v30" default=""/><string name="v31" default=""/><string name="v32" default=""/><string name="v33" default=""/><string name="v34" default=""/>
+    <string name="v40" default=""/><string name="v41" default=""/><string name="v42" default=""/><string name="v43" default=""/><string name="v44" default=""/>
+    <string name="showPopup" default="false"/>
+    <string name="popupText" default=""/>
+    <string name="hintBtnColor" default="#a0a0a0"/>
+  </state>
+
+  <timer interval="100" call="tick"/>
+
+  <script language="lua">
+    -- Формат: {направление, подсказка, координаты, буквы, детальная_подсказка}
+    local words = {
+      {">", "Цветок", {{0,0},{0,1},{0,2}}, {"М","А","К"}, "Красный полевой цветок"},
+      {"v", "Питомец", {{0,2},{1,2},{2,2}}, {"К","О","Т"}, "Мурлыкает и ловит мышей"},
+      {">", "Электричество", {{2,2},{2,3},{2,4}}, {"Т","О","К"}, "Бежит по проводам"},
+    }
+
+    -- Цвета
+    local BLACK = "#111"
+    local CELL = "#333"
+    local SELECTED = "#1a237e"
+    local PARTIAL = "#1b4332"
+    local CORRECT = "#2e7d32"
+    local HINT_BTN_NORMAL = "#a0a0a0"
+    local HINT_BTN_USED = "#ff6b6b"
+
+    -- Какие ячейки активны (содержат буквы слов)
+    local activeCell = {}
+    for wi = 1, #words do
+      local coords = words[wi][3]
+      for ci = 1, #coords do
+        activeCell[coords[ci][1] .. "," .. coords[ci][2]] = true
+      end
+    end
+
+    local solved = {}
+    local hintUsed = {}
+    for i = 1, #words do
+      solved[i] = false
+      hintUsed[i] = 0
+    end
+
+    local curWord = 1
+    local curPos = 1
+    local popupTimer = 0
+
+    local function vkey(r, c) return "v" .. r .. c end
+    local function cid(r, c) return "c" .. r .. c end
+
+    -- Таймер для попапа
+    function tick()
+      if popupTimer > 0 then
+        popupTimer = popupTimer - 1
+        if popupTimer == 0 then
+          state.showPopup = "false"
+        end
+      end
+    end
+
+    -- Показать попап на 3.5 сек
+    local function showPopupText(text)
+      state.popupText = text
+      state.showPopup = "true"
+      popupTimer = 35
+    end
+
+    -- Обновить цвет кнопки подсказки
+    local function updateHintBtn()
+      if hintUsed[curWord] > 0 then
+        state.hintBtnColor = HINT_BTN_USED
+      else
+        state.hintBtnColor = HINT_BTN_NORMAL
+      end
+    end
+
+    -- Кнопка подсказки
+    function showHint()
+      if solved[curWord] then return end
+      local w = words[curWord]
+      local letters = w[4]
+      local detail = w[5]
+
+      if hintUsed[curWord] == 0 then
+        showPopupText(detail)
+      else
+        local letterIdx = hintUsed[curWord]
+        if letterIdx <= #letters then
+          showPopupText(letterIdx .. ": " .. letters[letterIdx])
+        else
+          showPopupText("Больше подсказок нет")
+          return
+        end
+      end
+
+      hintUsed[curWord] = hintUsed[curWord] + 1
+      updateHintBtn()
+    end
+
+    local function countSolvedAt(r, c)
+      local count = 0
+      for wi = 1, #words do
+        if solved[wi] then
+          local cells = words[wi][3]
+          for ci = 1, #cells do
+            if cells[ci][1] == r and cells[ci][2] == c then
+              count = count + 1
+              break
+            end
+          end
+        end
+      end
+      return count
+    end
+
+    local function countWordsAt(r, c)
+      local count = 0
+      for wi = 1, #words do
+        local cells = words[wi][3]
+        for ci = 1, #cells do
+          if cells[ci][1] == r and cells[ci][2] == c then
+            count = count + 1
+            break
+          end
+        end
+      end
+      return count
+    end
+
+    local function checkWord(wi)
+      local cells = words[wi][3]
+      local letters = words[wi][4]
+      for ci = 1, #cells do
+        if state[vkey(cells[ci][1], cells[ci][2])] ~= letters[ci] then
+          return false
+        end
+      end
+      return true
+    end
+
+    local function colorCell(r, c)
+      local s = countSolvedAt(r, c)
+      local t = countWordsAt(r, c)
+      if s == 0 then
+        setAttr(cid(r, c), "bgcolor", CELL)
+      elseif s < t then
+        setAttr(cid(r, c), "bgcolor", PARTIAL)
+      else
+        setAttr(cid(r, c), "bgcolor", CORRECT)
+      end
+    end
+
+    local function checkAllWords()
+      local all = true
+      for wi = 1, #words do
+        if checkWord(wi) then
+          solved[wi] = true
+        else
+          all = false
+        end
+      end
+      for wi = 1, #words do
+        local cells = words[wi][3]
+        for ci = 1, #cells do
+          colorCell(cells[ci][1], cells[ci][2])
+        end
+      end
+      return all
+    end
+
+    local function clearHL()
+      for wi = 1, #words do
+        if not solved[wi] then
+          local cells = words[wi][3]
+          for ci = 1, #cells do
+            local r, c = cells[ci][1], cells[ci][2]
+            if countSolvedAt(r, c) == 0 then
+              setAttr(cid(r, c), "bgcolor", CELL)
+            end
+          end
+        end
+      end
+    end
+
+    local function highlight()
+      clearHL()
+      local w = words[curWord]
+      state.dir = w[1]
+      state.hint = w[2]
+      if not solved[curWord] then
+        local cells = w[3]
+        local r = cells[curPos][1]
+        local c = cells[curPos][2]
+        setAttr(cid(r, c), "bgcolor", SELECTED)
+      end
+      updateHintBtn()
+    end
+
+    -- Найти нерешённое слово, пересекающееся с ячейкой (r,c),
+    -- и перейти на первую пустую позицию в нём
+    local function jumpToIntersecting(r, c)
+      for wi = 1, #words do
+        if wi ~= curWord and not solved[wi] then
+          local cells = words[wi][3]
+          for ci = 1, #cells do
+            if cells[ci][1] == r and cells[ci][2] == c then
+              curWord = wi
+              -- Первая пустая позиция
+              for pi = 1, #cells do
+                if state[vkey(cells[pi][1], cells[pi][2])] == "" then
+                  curPos = pi
+                  return true
+                end
+              end
+              curPos = 1
+              return true
+            end
+          end
+        end
+      end
+      return false
+    end
+
+    function doTap(r, c)
+      for wi = 1, #words do
+        if not solved[wi] then
+          local cells = words[wi][3]
+          for ci = 1, #cells do
+            if cells[ci][1] == r and cells[ci][2] == c then
+              curWord = wi
+              curPos = ci
+              highlight()
+              return
+            end
+          end
+        end
+      end
+    end
+
+    function addLetter(l)
+      local w = words[curWord]
+      local cells = w[3]
+      if solved[curWord] then return end
+
+      if curPos <= #cells then
+        local r = cells[curPos][1]
+        local c = cells[curPos][2]
+        state[vkey(r, c)] = l
+
+        if checkAllWords() then
+          ui.navigate("/win")
+          return
+        end
+
+        if solved[curWord] then
+          -- Слово решено — переход к пересекающемуся
+          -- Ищем через каждую ячейку решённого слова (с конца)
+          for ci = #cells, 1, -1 do
+            if jumpToIntersecting(cells[ci][1], cells[ci][2]) then
+              highlight()
+              return
+            end
+          end
+        elseif curPos < #cells then
+          curPos = curPos + 1
+        end
+
+        highlight()
+      end
+    end
+
+    function kDel()
+      if solved[curWord] then return end
+      local cells = words[curWord][3]
+      local r = cells[curPos][1]
+      local c = cells[curPos][2]
+      if state[vkey(r, c)] == "" and curPos > 1 then
+        curPos = curPos - 1
+        r = cells[curPos][1]
+        c = cells[curPos][2]
+      end
+      state[vkey(r, c)] = ""
+      highlight()
+    end
+
+    function nextWord()
+      local start = curWord
+      repeat
+        curWord = curWord + 1
+        if curWord > #words then
+          curWord = 1
+        end
+        if not solved[curWord] then
+          curPos = 1
+          highlight()
+          return
+        end
+      until curWord == start
+    end
+
+    function restart()
+      for wi = 1, #words do
+        solved[wi] = false
+        hintUsed[wi] = 0
+        local cells = words[wi][3]
+        for ci = 1, #cells do
+          state[vkey(cells[ci][1], cells[ci][2])] = ""
+        end
+      end
+      curWord = 1
+      curPos = 1
+      state.showPopup = "false"
+      popupTimer = 0
+      ui.navigate("/main")
+      initColors()
+      highlight()
+    end
+
+    function initColors()
+      for r = 0, 4 do
+        for c = 0, 4 do
+          if activeCell[r .. "," .. c] then
+            setAttr(cid(r, c), "bgcolor", CELL)
+          else
+            setAttr(cid(r, c), "bgcolor", BLACK)
+          end
+        end
+      end
+    end
+
+    initColors()
+    highlight()
+  </script>
+</app>

@@ -54,5 +54,6 @@ flutter:
   uses-material-design: true
   assets:
     - assets/prompts/
+    - assets/prompts/examples/
     - assets/server/
     - assets/server/standalone/

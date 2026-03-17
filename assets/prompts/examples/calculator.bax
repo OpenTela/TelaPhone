@@ -1,38 +1,46 @@
-<app version="1.0" os="1.0">
+<app title="Calculator" version="1.1" os="1.0">
+  <templates>
+    <template id="Num">
+      <td><button class="btn btn-num" onclick="appendDigit('{n}')">{n}</button></td>
+    </template>
+    <template id="Func">
+      <td><button class="btn btn-func" onclick="{click}">{label}</button></td>
+    </template>
+    <template id="Op">
+      <td><button class="btn" onclick="{click}" bgcolor="{bg}" color="#fff">{label}</button></td>
+    </template>
+  </templates>
+
   <ui default="/calc">
     <page id="calc" bgcolor="#000000">
-      <!-- Дисплей -->
       <label class="display" align="right" x="12%" y="7%" w="76%" h="10%">{display}</label>
 
-      <!-- Ряд 1: C, +/-, %, / -->
-      <button class="btn btn-func" x="5%" y="21%" onclick="clear">C</button>
-      <button class="btn btn-func" x="28%" y="21%" onclick="negate">+/-</button>
-      <button class="btn btn-func" x="51%" y="21%" onclick="percent">%</button>
-      <button class="btn" x="74%" y="21%" onclick="opDiv" bgcolor="{bgDiv}" color="#fff">/</button>
-
-      <!-- Ряд 2: 7, 8, 9, * -->
-      <button class="btn btn-num" x="5%" y="35%" onclick="digit7">7</button>
-      <button class="btn btn-num" x="28%" y="35%" onclick="digit8">8</button>
-      <button class="btn btn-num" x="51%" y="35%" onclick="digit9">9</button>
-      <button class="btn" x="74%" y="35%" onclick="opMul" bgcolor="{bgMul}" color="#fff">x</button>
-
-      <!-- Ряд 3: 4, 5, 6, - -->
-      <button class="btn btn-num" x="5%" y="49%" onclick="digit4">4</button>
-      <button class="btn btn-num" x="28%" y="49%" onclick="digit5">5</button>
-      <button class="btn btn-num" x="51%" y="49%" onclick="digit6">6</button>
-      <button class="btn" x="74%" y="49%" onclick="opSub" bgcolor="{bgSub}" color="#fff">-</button>
-
-      <!-- Ряд 4: 1, 2, 3, + -->
-      <button class="btn btn-num" x="5%" y="63%" onclick="digit1">1</button>
-      <button class="btn btn-num" x="28%" y="63%" onclick="digit2">2</button>
-      <button class="btn btn-num" x="51%" y="63%" onclick="digit3">3</button>
-      <button class="btn" x="74%" y="63%" onclick="opAdd" bgcolor="{bgAdd}" color="#fff">+</button>
-
-      <!-- Ряд 5: DEL, 0, ., = -->
-      <button class="btn btn-func" x="5%" y="77%" onclick="backspace">DEL</button>
-      <button class="btn btn-num" x="28%" y="77%" onclick="digit0">0</button>
-      <button class="btn btn-num" x="51%" y="77%" onclick="dot">.</button>
-      <button class="btn btn-eq" x="74%" y="77%" onclick="equals">=</button>
+      <table x="4%" y="20%" w="92%" h="75%" cellspacing="2%">
+        <tr>
+          <Func click="clear" label="C"/>
+          <Func click="negate" label="+/-"/>
+          <Func click="percent" label="%"/>
+          <Op click="opDiv" bg="{bgDiv}" label="/"/>
+        </tr>
+        <tr>
+          <Num n="7"/>  <Num n="8"/>  <Num n="9"/>
+          <Op click="opMul" bg="{bgMul}" label="x"/>
+        </tr>
+        <tr>
+          <Num n="4"/>  <Num n="5"/>  <Num n="6"/>
+          <Op click="opSub" bg="{bgSub}" label="-"/>
+        </tr>
+        <tr>
+          <Num n="1"/>  <Num n="2"/>  <Num n="3"/>
+          <Op click="opAdd" bg="{bgAdd}" label="+"/>
+        </tr>
+        <tr>
+          <Func click="backspace" label="DEL"/>
+          <Num n="0"/>
+          <td><button class="btn btn-num" onclick="dot">.</button></td>
+          <td><button class="btn btn-eq" onclick="equals">=</button></td>
+        </tr>
+      </table>
     </page>
   </ui>
 
@@ -72,16 +80,6 @@
       end
     end
 
-    function digit0() appendDigit('0') end
-    function digit1() appendDigit('1') end
-    function digit2() appendDigit('2') end
-    function digit3() appendDigit('3') end
-    function digit4() appendDigit('4') end
-    function digit5() appendDigit('5') end
-    function digit6() appendDigit('6') end
-    function digit7() appendDigit('7') end
-    function digit8() appendDigit('8') end
-    function digit9() appendDigit('9') end
 
     function dot()
       if state.newInput then
@@ -132,11 +130,9 @@
 
     function opAdd() setOp('+', 'bgAdd') end
     function opSub()
-      -- Если уже есть операция и ждём ввода — это минус числа
       if state.op ~= '' and state.newInput then
         state.display = '-'
         state.newInput = false
-        -- НЕ сбрасываем подсветку - операция всё ещё активна
       else
         setOp('-', 'bgSub')
       end
@@ -179,12 +175,7 @@
   </script>
 
   <style>
-  /* Auto-generated */
-
-    button { height: 12%; width: 21%; }
-
-  /* Original */
-
+    button { width: 100%; height: 100%; }
     .display { background: #1c1c1c; color: #ffffff; font-size: 32; border-radius: 8; padding-left: 10; padding-right: 10; }
     .btn { border-radius: 12px; }
     .btn-num { background: #505050; color: #ffffff; }
