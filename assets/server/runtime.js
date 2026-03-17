@@ -144,9 +144,14 @@ function normColor(v) {
 function callLua(fn) {
   if (!luaReady || !luaEngine) { clog("[no-lua] " + fn + "()", "cw"); return; }
   try {
-    var f = luaEngine.global.get(fn);
-    if (typeof f === "function") f();
-    else clog("[lua] " + fn + " is not a function", "cw");
+    if (fn.indexOf("(") >= 0) {
+      // Expression with args: appendDigit('7') → execute as Lua string
+      luaEngine.doString(fn);
+    } else {
+      var f = luaEngine.global.get(fn);
+      if (typeof f === "function") f();
+      else clog("[lua] " + fn + " is not a function", "cw");
+    }
   } catch(err) { clog("[lua-err] " + fn + ": " + err.message, "ce"); }
 }
 
@@ -167,6 +172,8 @@ function luaPreprocess(src) {
 async function setupLua(app) {
   if (!luaReady || !luaEngine) return;
   var G = luaEngine.global;
+
+  // === state metatable ===
   G.set("__fc_get_state", function(key) { return getState(key); });
   G.set("__fc_set_state", function(key, val) { setState(key, val); });
   await luaEngine.doString(
@@ -175,14 +182,17 @@ async function setupLua(app) {
     "  __newindex = function(t, k, v) __fc_set_state(k, v) end" +
     "})"
   );
-  G.set("navigate", function(page) { navigateTo(page); });
-  G.set("focus", function(id) {
+
+  // === JS bridges (internal) ===
+  function cssVal(v) { var s = String(v); if (/^-?\d+(\.\d+)?$/.test(s)) return s + "px"; return s; }
+
+  G.set("__ui_navigate", function(page) { navigateTo(page); });
+  G.set("__ui_focus", function(id) {
     var w = widgets[id];
     if (w && w.tagName === "INPUT") { w.focus(); return true; }
     return false;
   });
-  function cssVal(v) { var s = String(v); if (/^-?\d+(\.\d+)?$/.test(s)) return s + "px"; return s; }
-  G.set("setAttr", function(id, attr, val) {
+  G.set("__ui_setAttr", function(id, attr, val) {
     var w = widgets[id]; if (!w) return;
     if (attr === "bgcolor") w.style.background = normColor(val);
     else if (attr === "color") w.style.color = normColor(val);
@@ -197,7 +207,7 @@ async function setupLua(app) {
     else if (attr === "opacity") w.style.opacity = val;
     else if (attr === "z-index") w.style.zIndex = val;
   });
-  G.set("getAttr", function(id, attr) {
+  G.set("__ui_getAttr", function(id, attr) {
     var w = widgets[id]; if (!w) return "";
     if (attr === "bgcolor") return w.style.background || w.style.backgroundColor || "";
     if (attr === "color") return w.style.color || "";
@@ -213,28 +223,138 @@ async function setupLua(app) {
     if (attr === "z-index") return w.style.zIndex || "";
     return "";
   });
+  G.set("__app_exit", function(code, msg) {
+    clog("[app.exit] " + (msg || "code=" + (code||0)), "ci");
+  });
+  G.set("__app_launch", function(name) {
+    clog("[app.launch] " + name, "ci");
+  });
   G.set("print", function() {
     var parts = [];
     for (var i = 0; i < arguments.length; i++) parts.push(String(arguments[i]));
     clog("[lua] " + parts.join("\t"));
   });
-  G.set("exit", function() { clog("[lua] exit()", "ci"); });
-  await luaEngine.doString("app = { launch = function(name) print('[app.launch] ' .. tostring(name)) end }");
-  G.set("setTimeout", function(ms, callback) {
-    setTimeout(function() { if (typeof callback === "function") callback(); }, ms || 0);
-  });
-  await luaEngine.doString("net = { connected = function() return true end }");
 
-  // canvas
-  await luaEngine.doString([
-    "canvas = {}",
-    "canvas.clear = function(id, c) __fc_canvas('clear', id, c) end",
-    "canvas.rect = function(id, x, y, w, h, c) __fc_canvas('rect', id, x, y, w, h, c) end",
-    "canvas.pixel = function(id, x, y, c) __fc_canvas('pixel', id, x, y, 0, 0, c) end",
-    "canvas.line = function(id, x1, y1, x2, y2, c) __fc_canvas('line', id, x1, y1, x2, y2, c) end",
-    "canvas.circle = function(id, cx, cy, r, c) __fc_canvas('circle', id, cx, cy, r, 0, c) end",
-    "canvas.refresh = function(id) end",
-  ].join("\n"));
+  // === ui.* namespace + backward compat aliases ===
+  await luaEngine.doString(
+    "ui = {\n" +
+    "  navigate  = __ui_navigate,\n" +
+    "  setAttr   = __ui_setAttr,\n" +
+    "  getAttr   = __ui_getAttr,\n" +
+    "  focus     = __ui_focus,\n" +
+    "  freeze    = function() end,\n" +
+    "  unfreeze  = function() end\n" +
+    "}\n" +
+    "navigate = ui.navigate\n" +
+    "focus    = ui.focus\n" +
+    "setAttr  = ui.setAttr\n" +
+    "getAttr  = ui.getAttr"
+  );
+
+  // === app.* namespace + alias ===
+  await luaEngine.doString(
+    "app = {\n" +
+    "  exit   = __app_exit,\n" +
+    "  launch = __app_launch\n" +
+    "}\n" +
+    "exit = app.exit"
+  );
+
+  // === timer.* namespace + alias ===
+  var luaTimers = {};
+  G.set("__timer_once", function(callback, ms) {
+    var timerId;
+    if (typeof callback === "string") {
+      var fn = callback;
+      timerId = setTimeout(function() { delete luaTimers[timerId]; callLua(fn); }, ms || 0);
+      luaTimers[fn] = timerId;
+    } else if (typeof callback === "function") {
+      timerId = setTimeout(function() { delete luaTimers[timerId]; callback(); }, ms || 0);
+    }
+    return timerId;
+  });
+  G.set("__timer_interval", function(callback, ms) {
+    var timerId;
+    if (typeof callback === "string") {
+      var fn = callback;
+      timerId = setInterval(function() { callLua(fn); }, ms || 1000);
+      luaTimers[fn] = timerId;
+    } else if (typeof callback === "function") {
+      timerId = setInterval(function() { callback(); }, ms || 1000);
+    }
+    activeTimers.push(timerId);
+    return timerId;
+  });
+  G.set("__timer_clear", function(name) {
+    if (typeof name === "string" && luaTimers[name]) {
+      clearTimeout(luaTimers[name]);
+      clearInterval(luaTimers[name]);
+      var idx = activeTimers.indexOf(luaTimers[name]);
+      if (idx >= 0) activeTimers.splice(idx, 1);
+      delete luaTimers[name];
+      return true;
+    } else if (typeof name === "number") {
+      clearTimeout(name);
+      clearInterval(name);
+      var idx = activeTimers.indexOf(name);
+      if (idx >= 0) activeTimers.splice(idx, 1);
+      return true;
+    }
+    return false;
+  });
+  await luaEngine.doString(
+    "timer = {\n" +
+    "  once     = __timer_once,\n" +
+    "  interval = __timer_interval,\n" +
+    "  clear    = __timer_clear\n" +
+    "}\n" +
+    "setTimeout = timer.once\n" +
+    "setInterval = timer.interval"
+  );
+
+  // === net.* namespace + alias ===
+  G.set("__js_fetch", function(url, method, body, format, fields, callback) {
+    var opts = { method: method || "GET" };
+    if (body) { opts.body = body; opts.headers = { "Content-Type": "application/json" }; }
+    window.fetch(url, opts).then(function(resp) {
+      var status = resp.status, ok = status >= 200 && status < 300;
+      return resp.text().then(function(text) {
+        var result = { status: status, ok: ok, body: text };
+        if (format === "json" && text) {
+          try {
+            var json = JSON.parse(text);
+            if (fields && fields.length > 0) {
+              var filtered = {};
+              for (var i = 0; i < fields.length; i++) { var f = fields[i]; if (json[f] !== undefined) filtered[f] = json[f]; }
+              result.body = filtered;
+            } else { result.body = json; }
+          } catch(e) { result.body = text; }
+        }
+        return result;
+      });
+    }).then(function(result) {
+      if (typeof callback === "function") callback(result);
+    }).catch(function(err) {
+      if (typeof callback === "function") callback({ status: 0, ok: false, error: err.message, body: "" });
+    });
+  });
+  await luaEngine.doString(
+    "local function _fetch(opts, callback)\n" +
+    "  local url = opts.url or ''\n" +
+    "  local method = opts.method or 'GET'\n" +
+    "  local body = opts.body\n" +
+    "  local format = opts.format\n" +
+    "  local fields = opts.fields or {}\n" +
+    "  __js_fetch(url, method, body, format, fields, callback)\n" +
+    "end\n" +
+    "net = {\n" +
+    "  fetch     = _fetch,\n" +
+    "  connected = function() return true end\n" +
+    "}\n" +
+    "fetch = net.fetch"
+  );
+
+  // === canvas.* ===
   G.set("__fc_canvas", function(op, id, a, b, c, d, e) {
     var w = widgets[id]; if (!w || w.tagName !== "CANVAS") return;
     var ctx = w.getContext("2d");
@@ -244,8 +364,18 @@ async function setupLua(app) {
     else if (op === "line") { ctx.strokeStyle = normColor(e); ctx.beginPath(); ctx.moveTo(a, b); ctx.lineTo(c, d); ctx.stroke(); }
     else if (op === "circle") { ctx.fillStyle = normColor(d || e); ctx.beginPath(); ctx.arc(a, b, c, 0, Math.PI*2); ctx.fill(); }
   });
+  await luaEngine.doString(
+    "canvas = {\n" +
+    "  clear   = function(id, c) __fc_canvas('clear', id, c) end,\n" +
+    "  rect    = function(id, x, y, w, h, c) __fc_canvas('rect', id, x, y, w, h, c) end,\n" +
+    "  pixel   = function(id, x, y, c) __fc_canvas('pixel', id, x, y, 0, 0, c) end,\n" +
+    "  line    = function(id, x1, y1, x2, y2, c) __fc_canvas('line', id, x1, y1, x2, y2, c) end,\n" +
+    "  circle  = function(id, cx, cy, r, c) __fc_canvas('circle', id, cx, cy, r, 0, c) end,\n" +
+    "  refresh = function(id) end\n" +
+    "}"
+  );
 
-  // os.time / os.date
+  // === os.time / os.date ===
   G.set("__js_time", function(y, m, d, h, min, s) {
     if (y === undefined) return Math.floor(Date.now() / 1000);
     var day = (d !== undefined && d !== null) ? d : 1;
@@ -280,47 +410,19 @@ async function setupLua(app) {
     "end"
   );
 
-  // json
+  // === json.* ===
   G.set("__fc_json_parse", function(s) { try { return JSON.parse(s); } catch(e) { return null; } });
   G.set("__fc_json_stringify", function(t) { try { return JSON.stringify(t); } catch(e) { return "{}"; } });
   await luaEngine.doString(
-    "json = {}\njson.parse = function(s) return __fc_json_parse(s) end\n" +
-    "json.decode = json.parse\njson.stringify = function(t) return __fc_json_stringify(t) end\njson.encode = json.stringify"
+    "json = {\n" +
+    "  parse     = function(s) return __fc_json_parse(s) end,\n" +
+    "  decode    = function(s) return __fc_json_parse(s) end,\n" +
+    "  stringify = function(t) return __fc_json_stringify(t) end,\n" +
+    "  encode    = function(t) return __fc_json_stringify(t) end\n" +
+    "}"
   );
 
-  // fetch
-  G.set("__js_fetch", function(url, method, body, format, fields, callback) {
-    var opts = { method: method || "GET" };
-    if (body) { opts.body = body; opts.headers = { "Content-Type": "application/json" }; }
-    window.fetch(url, opts).then(function(resp) {
-      var status = resp.status, ok = status >= 200 && status < 300;
-      return resp.text().then(function(text) {
-        var result = { status: status, ok: ok, body: text };
-        if (format === "json" && text) {
-          try {
-            var json = JSON.parse(text);
-            if (fields && fields.length > 0) {
-              var filtered = {};
-              for (var i = 0; i < fields.length; i++) { var f = fields[i]; if (json[f] !== undefined) filtered[f] = json[f]; }
-              result.body = filtered;
-            } else { result.body = json; }
-          } catch(e) { result.body = text; }
-        }
-        return result;
-      });
-    }).then(function(result) {
-      if (typeof callback === "function") callback(result);
-    }).catch(function(err) {
-      if (typeof callback === "function") callback({ status: 0, ok: false, error: err.message, body: "" });
-    });
-  });
-  await luaEngine.doString(
-    "function fetch(opts, callback)\n" +
-    "  local url = opts.url or ''\n  local method = opts.method or 'GET'\n" +
-    "  local body = opts.body\n  local format = opts.format\n  local fields = opts.fields or {}\n" +
-    "  __js_fetch(url, method, body, format, fields, callback)\nend"
-  );
-
+  // === Run user script ===
   var se = app.querySelector("script");
   if (se && se.textContent && se.textContent !== "X") {
     try { await luaEngine.doString(luaPreprocess(se.textContent)); clog("Script OK", "ci"); }
@@ -343,10 +445,164 @@ function parseXML(src) {
   src = src.replace(scRe, function(m, t, a) { if (m.charAt(m.length - 2) === "/") return m; return "<" + t + a + "/>"; });
   var doc = new DOMParser().parseFromString(src, "text/xml");
   var err = doc.querySelector("parsererror");
-  if (err) { clog("[xml-err] " + err.textContent.substring(0, 200), "ce"); throw new Error("XML parse error"); }
+  if (err) { var errMsg = err.textContent.substring(0, 200); clog("[xml-err] " + errMsg, "ce"); throw new Error("XML parse error: " + errMsg); }
   var se = doc.querySelector("script");
   if (se) se.textContent = luaCode;
   return doc.documentElement;
+}
+
+// ======================== TEMPLATE ENGINE ========================
+var appTemplates = {};
+
+function parseTemplates(html) {
+  appTemplates = {};
+  var m = html.match(/<templates[^>]*>([\s\S]*?)<\/templates>/i);
+  if (!m) return html;
+  var section = m[1];
+  // Extract each <template id="Name">body</template>
+  var re = /<template\s+id="([^"]+)"[^>]*>([\s\S]*?)<\/template>/gi;
+  var tm;
+  while ((tm = re.exec(section)) !== null) {
+    var id = tm[1], body = tm[2].trim();
+    if (!/^[A-Z]/.test(id)) { clog("[tpl] '" + id + "' must be PascalCase", "ce"); continue; }
+    appTemplates[id.toLowerCase()] = body;
+  }
+  var cnt = Object.keys(appTemplates).length;
+  if (cnt) clog("Templates: " + cnt, "ci");
+  // Remove <templates> section from HTML
+  return html.replace(/<templates[^>]*>[\s\S]*?<\/templates>/i, "");
+}
+
+function substituteVar(text, varName, val) {
+  var pattern = "{" + varName + "}";
+  var result = "", pos = 0;
+  while (pos < text.length) {
+    var idx = text.indexOf(pattern, pos);
+    if (idx < 0) { result += text.substring(pos); break; }
+    result += text.substring(pos, idx) + val;
+    pos = idx + pattern.length;
+  }
+  return result;
+}
+
+function expandTemplates(html) {
+  if (!Object.keys(appTemplates).length) return html;
+  var result = "";
+  var i = 0;
+  while (i < html.length) {
+    if (html[i] === "<" && i + 1 < html.length && /[A-Z]/.test(html[i + 1])) {
+      // Read tag name
+      var j = i + 1;
+      while (j < html.length && /[a-zA-Z0-9_]/.test(html[j])) j++;
+      var tagName = html.substring(i + 1, j);
+      var key = tagName.toLowerCase();
+      if (!appTemplates[key]) { result += html[i++]; continue; }
+      // Find end of opening tag (respect quotes)
+      var attrStart = j;
+      while (j < html.length && html[j] !== ">") {
+        if (html[j] === '"') { j++; while (j < html.length && html[j] !== '"') j++; if (j < html.length) j++; }
+        else if (html[j] === "'" ) { j++; while (j < html.length && html[j] !== "'") j++; if (j < html.length) j++; }
+        else j++;
+      }
+      var selfClose = j > 0 && html[j - 1] === "/";
+      var attrEnd = selfClose ? j - 1 : j;
+      var attrStr = html.substring(attrStart, attrEnd).trim();
+      if (j < html.length) j++; // skip >
+      if (!selfClose) {
+        // Find closing tag </TagName>
+        var closeRe = new RegExp("</" + tagName + ">", "i");
+        var closeMatch = closeRe.exec(html.substring(j));
+        if (closeMatch) j += closeMatch.index + closeMatch[0].length;
+      }
+      // Parse attributes and substitute into template body
+      var body = appTemplates[key];
+      var attrRe = /([a-zA-Z_][\w-]*)="([^"]*)"/g;
+      var am;
+      while ((am = attrRe.exec(attrStr)) !== null) {
+        body = substituteVar(body, am[1].toLowerCase(), am[2]);
+      }
+      result += body;
+      i = j;
+    } else {
+      result += html[i++];
+    }
+  }
+  return result;
+}
+
+function expandFor(html) {
+  var result = "";
+  var i = 0;
+  while (i < html.length) {
+    if (html[i] === "@" && html.substring(i + 1, i + 5) === "for(") {
+      // Parse @for(var in start..end [step N]) { body }
+      var p = i + 5; // after "for("
+      // Variable name
+      while (p < html.length && html[p] === " ") p++;
+      var vs = p;
+      while (p < html.length && /[a-zA-Z0-9_]/.test(html[p])) p++;
+      var varName = html.substring(vs, p);
+      // "in"
+      while (p < html.length && html[p] === " ") p++;
+      if (html.substring(p, p + 2) === "in") p += 2;
+      while (p < html.length && html[p] === " ") p++;
+      // start..end
+      var ns = p;
+      while (p < html.length && /[\d-]/.test(html[p])) p++;
+      var rangeStart = parseInt(html.substring(ns, p)) || 0;
+      if (html.substring(p, p + 2) === "..") p += 2;
+      ns = p;
+      while (p < html.length && /[\d-]/.test(html[p])) p++;
+      var rangeEnd = parseInt(html.substring(ns, p)) || 0;
+      // Optional step
+      var step = 1;
+      while (p < html.length && html[p] === " ") p++;
+      if (html.substring(p, p + 4) === "step") {
+        p += 4;
+        while (p < html.length && html[p] === " ") p++;
+        ns = p;
+        while (p < html.length && /\d/.test(html[p])) p++;
+        step = parseInt(html.substring(ns, p)) || 1;
+      }
+      // Skip to )
+      while (p < html.length && html[p] !== ")") p++;
+      if (p < html.length) p++; // skip )
+      // Skip whitespace to {
+      while (p < html.length && /\s/.test(html[p])) p++;
+      if (p < html.length && html[p] === "{") {
+        p++; // skip {
+        // Find matching }
+        var depth = 1, bodyStart = p;
+        while (p < html.length && depth > 0) {
+          if (html[p] === "{") depth++;
+          else if (html[p] === "}") depth--;
+          if (depth > 0) p++;
+        }
+        var body = html.substring(bodyStart, p);
+        if (p < html.length) p++; // skip }
+        // Expand
+        for (var v = rangeStart; v <= rangeEnd; v += step) {
+          result += substituteVar(body, varName, String(v));
+        }
+        i = p;
+      } else { result += html[i++]; }
+    } else {
+      result += html[i++];
+    }
+  }
+  return result;
+}
+
+function preprocessHTML(html) {
+  html = parseTemplates(html);
+  var MAX_PASSES = 8;
+  for (var pass = 0; pass < MAX_PASSES; pass++) {
+    var prev = html;
+    html = expandFor(html);
+    html = expandTemplates(html);
+    if (html === prev) break; // stable
+  }
+  return html;
 }
 
 // ======================== CSS ENGINE ========================
@@ -426,43 +682,86 @@ function applyDynamicClass(el, xml, tagName) {
 
 // ======================== VALIDATION ========================
 window.validateCode = function(xmlStr) {
-  var errors = [], warnings = [], app;
-  try { app = parseXML(xmlStr); }
-  catch(e) { errors.push({code:"XML_PARSE",msg:"XML: "+e.message}); return {valid:false,errors:errors,warnings:warnings}; }
-  if (app.tagName.toLowerCase() !== "app") errors.push({code:"NO_APP",msg:"Root must be <app>"});
+  var errors = [], warnings = [];
+  var lines = xmlStr.split("\n");
+
+  // Find line number of needle in original source
+  function findLine(needle) {
+    if (!needle) return 0;
+    for (var i = 0; i < lines.length; i++) {
+      if (lines[i].indexOf(needle) >= 0) return i + 1;
+    }
+    return 0;
+  }
+
+  var app;
+  try { app = parseXML(preprocessHTML(xmlStr)); }
+  catch(e) {
+    var xmlLine = 1;
+    var lm = String(e.message).match(/line\s+(\d+)/i);
+    if (lm) xmlLine = parseInt(lm[1]);
+    errors.push({code:"XML_PARSE", msg:"XML: "+e.message, line:xmlLine});
+    return {valid:false, errors:errors, warnings:warnings};
+  }
+  if (app.tagName.toLowerCase() !== "app") errors.push({code:"NO_APP", msg:"Root must be <app>", line:1});
+
+  // Collect state vars
   var stateVars = {}, stateEl = app.querySelector("state");
   if (stateEl) for (var i = 0; i < stateEl.children.length; i++) { var n = stateEl.children[i].getAttribute("name"); if (n) stateVars[n] = true; }
+
+  // Collect pages
   var pageIds = {}, allP = app.querySelectorAll("page");
   for (var i = 0; i < allP.length; i++) { var p = allP[i].getAttribute("id"); if (p) pageIds[p] = true; }
+
+  // Collect bindings and handlers
   var usedB = {}, usedH = {}, allE = app.querySelectorAll("*");
   for (var i = 0; i < allE.length; i++) {
     var el = allE[i], bind = el.getAttribute("bind");
     if (bind) usedB[bind] = true;
     for (var j = 0; j < el.attributes.length; j++) {
       var ms = el.attributes[j].value.match(/\{([^}]+)\}/g);
-      if (ms) ms.forEach(function(m){usedB[m.slice(1,-1)]=true;});
+      if (ms) ms.forEach(function(m){ usedB[m.slice(1,-1)] = true; });
     }
-    ["onclick","onchange","onenter","onblur","onhold","call"].forEach(function(a){ var f = el.getAttribute(a); if(f) usedH[f]=true; });
+    ["onclick","onchange","onenter","onblur","onhold","oninput","ontap","ondraw","call"].forEach(function(a){ var f = el.getAttribute(a); if(f) usedH[f]=true; });
   }
-  for (var v in usedB) if (!stateVars[v]) warnings.push({code:"UNBOUND",msg:"{"+v+"} not in <state>"});
+
+  // Unbound state vars
+  for (var v in usedB) {
+    if (!stateVars[v]) {
+      warnings.push({code:"UNBOUND", msg:"{"+v+"} not in <state>", line: findLine("{"+v+"}")});
+    }
+  }
+
+  // Nested labels in buttons
   var allButtons = app.querySelectorAll("button");
   for (var i = 0; i < allButtons.length; i++) {
     var btn = allButtons[i], nested = btn.querySelectorAll("label");
     if (nested.length > 1) {
       var btnId = btn.getAttribute("id") || btn.getAttribute("onclick") || ("button #"+(i+1));
-      warnings.push({code:"MULTI_LABEL", msg:"<button "+btnId+"> has "+nested.length+" nested <label>"});
+      warnings.push({code:"MULTI_LABEL", msg:"<button "+btnId+"> has "+nested.length+" nested <label>", line: findLine(btnId)});
     }
   }
+
+  // Missing functions
   var se = app.querySelector("script"), lc = se ? se.textContent : "", lf = {};
   var m2, re2 = /function\s+([a-zA-Z_]\w*)\s*\(/g;
   while ((m2 = re2.exec(lc)) !== null) lf[m2[1]] = true;
-  for (var fn in usedH) if (!lf[fn]) errors.push({code:"MISSING_FUNC",msg:fn+" not found"});
-  var emojiRegex = /[\u{1F300}-\u{1F9FF}]|[\u{2600}-\u{26FF}]|[\u{2700}-\u{27BF}]|[\u{FE00}-\u{FE0F}]|[\u{1F000}-\u{1F02F}]|[\u{1F0A0}-\u{1F0FF}]|[\u25B6\u25C0\u23F8-\u23FA]/gu;
-  var emojiMatches = xmlStr.match(emojiRegex);
-  if (emojiMatches) {
-    var unique = Array.from(new Set(emojiMatches));
-    errors.push({code:"EMOJI", msg:"Unicode emoji unsupported: " + unique.slice(0,5).join(" ")});
+  for (var fn in usedH) {
+    var fnName = fn.indexOf("(") >= 0 ? fn.substring(0, fn.indexOf("(")) : fn;
+    if (fnName && !lf[fnName]) {
+      errors.push({code:"MISSING_FUNC", msg:fnName+"() not found", line: findLine('"'+fnName) || findLine(fnName)});
+    }
   }
+
+  // Emoji
+  var emojiRegex = /[\u{1F300}-\u{1F9FF}]|[\u{2600}-\u{26FF}]|[\u{2700}-\u{27BF}]|[\u{FE00}-\u{FE0F}]|[\u{1F000}-\u{1F02F}]|[\u{1F0A0}-\u{1F0FF}]|[\u25B6\u25C0\u23F8-\u23FA]/gu;
+  for (var i = 0; i < lines.length; i++) {
+    if (emojiRegex.test(lines[i])) {
+      errors.push({code:"EMOJI", msg:"Emoji not supported by device font", line: i+1});
+      emojiRegex.lastIndex = 0;
+    }
+  }
+
   return {valid:!errors.length, errors:errors, warnings:warnings,
     stats:{pages:Object.keys(pageIds).length, stateVars:Object.keys(stateVars).length, functions:Object.keys(lf).length}};
 };
@@ -479,6 +778,7 @@ async function buildApp(xmlStr) {
   var old = screen.querySelectorAll(".fc-page,.fc-dots");
   for (var i = 0; i < old.length; i++) old[i].remove();
   clog("Parsing...", "ci");
+  xmlStr = preprocessHTML(xmlStr);
   var app = parseXML(xmlStr);
   parseAppCSS(app);
   var emojiRegex = /[\u{1F300}-\u{1F9FF}]|[\u{2600}-\u{26FF}]|[\u{2700}-\u{27BF}]|[\u{FE00}-\u{FE0F}]|[\u{1F000}-\u{1F02F}]|[\u{1F0A0}-\u{1F0FF}]|[\u25B6\u25C0\u23F8-\u23FA]/gu;
@@ -592,6 +892,7 @@ function buildWidgets(pageXml, pageDom) {
     else if (t==="switch") buildSwitch(ch[i], pageDom);
     else if (t==="image") buildImage(ch[i], pageDom);
     else if (t==="canvas") buildCanvas(ch[i], pageDom);
+    else if (t==="table") buildTable(ch[i], pageDom);
   }
 }
 
@@ -748,10 +1049,12 @@ function buildInput(xml, parent) {
   }
   var onenter = xml.getAttribute("onenter");
   if (onenter) { el.dataset.onenter = onenter; el.addEventListener("keydown", function(e) { if (e.key==="Enter") { e.preventDefault(); el.blur(); callLua(onenter); } }); }
+  var oninput = xml.getAttribute("oninput");
+  if (oninput) { el.dataset.oninput = oninput; el.addEventListener("input", function() { callLua(oninput); }); }
   var onblur = xml.getAttribute("onblur"), onchange = xml.getAttribute("onchange");
-  if (onblur) el.dataset.onblur = onblur;
-  el.addEventListener("blur", function() { if (onchange) callLua(onchange); if (onblur) callLua(onblur); });
-  applyDynamicClass(el,xml,"input"); parent.appendChild(el);
+  if (onblur) { el.dataset.onblur = onblur; el.addEventListener("blur", function() { callLua(onblur); }); }
+  if (onchange) { el.dataset.onchange = onchange; el.addEventListener("blur", function() { callLua(onchange); }); }
+  parent.appendChild(el);
 }
 function buildSlider(xml, parent) {
   var el = document.createElement("input"); el.className = "fc-slider"; el.type = "range";
@@ -809,6 +1112,108 @@ function buildCanvas(xml, parent) {
   var wA = xml.getAttribute("w"), hA = xml.getAttribute("h");
   el.width = (wA && wA.indexOf("%")>=0) ? Math.round(410*parseInt(wA)/100) : (parseInt(wA)||410);
   el.height = (hA && hA.indexOf("%")>=0) ? Math.round(502*parseInt(hA)/100) : (parseInt(hA)||502);
+  
+  // Canvas events
+  var ontap = xml.getAttribute("ontap");
+  var onhold = xml.getAttribute("onhold");
+  var ondraw = xml.getAttribute("ondraw");
+  
+  function getCanvasCoords(e) {
+    var rect = el.getBoundingClientRect();
+    var scaleX = el.width / rect.width;
+    var scaleY = el.height / rect.height;
+    var x = Math.round((e.clientX - rect.left) * scaleX);
+    var y = Math.round((e.clientY - rect.top) * scaleY);
+    return {x: x, y: y};
+  }
+  
+  if (ontap || onhold || ondraw) {
+    var holdTimer = null, holdFired = false, isDrawing = false;
+    
+    el.addEventListener("pointerdown", function(e) {
+      holdFired = false;
+      isDrawing = true;
+      var coords = getCanvasCoords(e);
+      if (onhold) {
+        holdTimer = setTimeout(function() {
+          holdFired = true;
+          holdTimer = null;
+          callLua(onhold + "(" + coords.x + "," + coords.y + ")");
+        }, 500);
+      }
+    });
+    
+    el.addEventListener("pointermove", function(e) {
+      if (isDrawing && ondraw) {
+        var coords = getCanvasCoords(e);
+        callLua(ondraw + "(" + coords.x + "," + coords.y + ")");
+      }
+    });
+    
+    el.addEventListener("pointerup", function(e) {
+      if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
+      if (!holdFired && ontap) {
+        var coords = getCanvasCoords(e);
+        callLua(ontap + "(" + coords.x + "," + coords.y + ")");
+      }
+      isDrawing = false;
+      holdFired = false;
+    });
+    
+    el.addEventListener("pointerleave", function() {
+      if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
+      isDrawing = false;
+    });
+  }
+  
+  parent.appendChild(el);
+}
+
+// TABLE
+function buildTable(xml, parent) {
+  var el = document.createElement("div"); el.className = "fc-table";
+  var id = xml.getAttribute("id"); if (id) widgets[id] = el;
+  applyGeometry(el, xml); applyVisible(el, xml);
+  applyColor(el, xml, "bgcolor", "background");
+  var spacing = xml.getAttribute("cellspacing") || "0";
+  el.style.gap = normUnit(spacing);
+  applyCSSProps(el, matchCSS("table", getClassList(xml)));
+  var ch = xml.children;
+  for (var i = 0; i < ch.length; i++) {
+    var t = ch[i].tagName.toLowerCase();
+    if (t === "tr") buildTr(ch[i], el);
+  }
+  parent.appendChild(el);
+}
+
+function buildTr(xml, parent) {
+  var el = document.createElement("div"); el.className = "fc-tr";
+  var id = xml.getAttribute("id"); if (id) widgets[id] = el;
+  var h = xml.getAttribute("h");
+  if (h) el.style.height = normUnit(h);
+  applyVisible(el, xml);
+  applyColor(el, xml, "bgcolor", "background");
+  applyCSSProps(el, matchCSS("tr", getClassList(xml)));
+  var spacing = parent.style.gap || "0";
+  el.style.gap = spacing;
+  var ch = xml.children;
+  for (var i = 0; i < ch.length; i++) {
+    var t = ch[i].tagName.toLowerCase();
+    if (t === "td") buildTd(ch[i], el);
+  }
+  parent.appendChild(el);
+}
+
+function buildTd(xml, parent) {
+  var el = document.createElement("div"); el.className = "fc-td";
+  var id = xml.getAttribute("id"); if (id) widgets[id] = el;
+  var w = xml.getAttribute("w");
+  if (w) { el.style.width = normUnit(w); el.style.flex = "none"; }
+  applyVisible(el, xml);
+  applyColor(el, xml, "bgcolor", "background");
+  applyCSSProps(el, matchCSS("td", getClassList(xml)));
+  // Build children inside td (buttons, labels, etc.)
+  buildWidgets(xml, el);
   parent.appendChild(el);
 }
 
@@ -874,17 +1279,26 @@ window.runAutoTest = runAutoTest;
 window.getAutoTestErrors = function() { return autoTestErrors; };
 
 // ======================== LOAD ========================
+var _appLoaded = false;
+
+function showManualInput() {
+  var loader = document.getElementById("load-loader");
+  var manual = document.getElementById("load-manual");
+  if (loader) loader.style.display = "none";
+  if (manual) manual.classList.add("show");
+}
+
 document.getElementById("run-btn").addEventListener("click", function() {
   var src = document.getElementById("app-source").value.trim();
-  if (src) buildApp(src).catch(function(e){clog("[err] "+e.message,"ce");});
+  if (src) { _appLoaded = true; buildApp(src).catch(function(e){clog("[err] "+e.message,"ce");}); }
 });
 var scr = document.getElementById("screen");
 scr.addEventListener("dragover", function(e){e.preventDefault();});
 scr.addEventListener("drop", function(e) {
   e.preventDefault(); var f = e.dataTransfer.files[0];
-  if (f) { var r = new FileReader(); r.onload = function(ev){buildApp(ev.target.result).catch(function(err){clog("[err] "+err.message,"ce");});}; r.readAsText(f); }
+  if (f) { _appLoaded = true; var r = new FileReader(); r.onload = function(ev){buildApp(ev.target.result).catch(function(err){clog("[err] "+err.message,"ce");});}; r.readAsText(f); }
 });
-window.loadApp = function(code) { return buildApp(code); };
+window.loadApp = function(code) { _appLoaded = true; return buildApp(code); };
 
 // ======================== INIT ========================
 clog("Loading Lua...", "ci");
@@ -892,13 +1306,21 @@ var factory = new wasmoon.LuaFactory();
 factory.createEngine().then(function(engine) {
   luaEngine = engine; luaReady = true;
   clog("Lua ready!", "ci");
-  document.getElementById("lua-status").textContent = "Lua ready!";
-  if (window.location.pathname === '/app') {
-    var autoTest = new URLSearchParams(window.location.search).get("autotest") === "1";
-    window.fetch('/app/code').then(function(res){if(res.ok)return res.text();return null;}).then(function(code) {
-      if (code) {
-        clog("Auto-loading app...","ci");
+  document.getElementById("lua-status").textContent = "Ready";
+  
+  // Try auto-load from server (any path, not just /app)
+  var tryAutoLoad = window.location.protocol !== 'file:';
+  if (tryAutoLoad) {
+    clog("Path: " + window.location.pathname, "ci");
+    window.fetch('/app/code').then(function(res){
+      if(res.ok) return res.text();
+      return null;
+    }).then(function(code) {
+      if (code && code.trim()) {
+        _appLoaded = true;
+        clog("Auto-loading app (" + code.length + " bytes)...","ci");
         buildApp(code).then(function() {
+          var autoTest = new URLSearchParams(window.location.search).get("autotest") === "1";
           if (autoTest) {
             clog("[autotest] Starting...", "ci");
             setTimeout(function() {
@@ -908,17 +1330,31 @@ factory.createEngine().then(function(engine) {
               clog("[autotest-done] " + JSON.stringify(result), "ci");
             }, 500);
           }
-        }).catch(function(e){clog("[auto-err] "+e.message,"ce");});
-      } else clog("No app loaded.","cw");
-    }).catch(function(){clog("No app loaded","cw");});
+        }).catch(function(e){
+          clog("[build-err] "+e.message,"ce");
+          document.getElementById("load-screen").style.display = "none";
+        });
+      } else {
+        clog("No app code from server", "ci");
+      }
+    }).catch(function(e){
+      clog("Server: " + (e.message || "no /app/code"), "ci");
+    });
   }
+  
+  // Show manual input after 400ms if nothing loaded
+  setTimeout(function() {
+    if (!_appLoaded) showManualInput();
+  }, 400);
 }).catch(function(err) {
   clog("[wasm-err] "+err.message,"ce");
-  document.getElementById("lua-status").textContent = "Lua failed: "+err.message;
+  document.getElementById("lua-status").textContent = "Failed";
+  showManualInput();
 });
 
 window.addEventListener('message', function(e) {
   if (e.data && e.data.type==='run' && e.data.code) {
+    _appLoaded = true;
     function tryLoad() {
       if (typeof luaReady!=='undefined' && luaReady) buildApp(e.data.code).catch(function(err){clog("[ide-err] "+err.message,"ce");});
       else setTimeout(tryLoad, 100);

@@ -1064,6 +1064,12 @@ class _EditorPageState extends State<_EditorPage> with SingleTickerProviderState
     }
   }
   
+  /// Код изменён относительно начального
+  bool get _isModified => _contentController.text.trim() != _initialContent.trim();
+  
+  /// Это example-шаблон
+  bool get _isExample => _initialContent.contains('title="example"');
+  
   /// Проверяет, есть ли несохранённые изменения
   bool _hasUnsavedChanges() {
     if (_messages.isNotEmpty) return true;
@@ -1536,9 +1542,7 @@ ${result.errorContext ?? 'нет данных'}
       final appName = _nameController.text.trim();
       
       // Проверяем, это НЕизменённый example-шаблон
-      final isUnmodifiedExample = widget.isNew && 
-          currentCode == _initialContent && 
-          currentCode.contains('title="example"');
+      final isUnmodifiedExample = widget.isNew && !_isModified && _isExample;
       
       // Загружаем промпты из файлов
       String systemPrompt;
@@ -2252,11 +2256,16 @@ ${result.errorContext ?? 'нет данных'}
     final code = _extractCode(response);
     
     if (code != null) {
+      // Пропускаем валидацию если код не изменился
+      if (code.trim() == _contentController.text.trim()) {
+        _showPopup(code);
+        return;
+      }
+      
       setState(() {
         _pendingCode = code;
         _validatingCode = true;
       });
-      // Фоновая валидация через HTTP
       _validateInBackground(code);
     }
   }

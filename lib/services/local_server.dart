@@ -78,7 +78,8 @@ class LocalServer {
     // GET /app — страница приложения (autoload)
     router.get('/app', _handleRuntime);
     
-    // Статика wasmoon
+    // Статика runtime + wasmoon
+    router.get('/runtime.js', _handleRuntimeJs);
     router.get('/wasmoon.js', _handleWasmoonJs);
     router.get('/glue.wasm', _handleGlueWasm);
     
@@ -203,6 +204,15 @@ class LocalServer {
       return Response.ok(content, headers: {'Content-Type': 'text/html; charset=utf-8'});
     } catch (e) {
       return Response.notFound('runtime.html not found: $e');
+    }
+  }
+
+  Future<Response> _handleRuntimeJs(Request request) async {
+    try {
+      final content = await rootBundle.loadString('assets/server/runtime.js');
+      return Response.ok(content, headers: {'Content-Type': 'application/javascript; charset=utf-8'});
+    } catch (e) {
+      return Response.notFound('runtime.js not found: $e');
     }
   }
 
