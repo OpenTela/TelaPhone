@@ -4,6 +4,9 @@
 
 Смартфон как часть экосистемы: AI-ассистент, BLE мост для интернета, трансляция экрана и эмулятор.
 
+![TelaPhone ESP32 smartwatch assistent](docs/screens/main.png)
+![TelaPhone screenshare mode](docs/screens/screenshare.png)
+
 ---
 
 ## Возможности
