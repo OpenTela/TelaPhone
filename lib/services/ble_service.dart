@@ -833,8 +833,9 @@ class BleService extends ChangeNotifier {
       // Сохраняем для автоподключения
       _saveLastDevice(address, _deviceName);
       
-      // Синхронизация протокола и времени
-      await sysSync();
+      // Синхронизация протокола и времени (передаём язык ОС)
+      final lang = Platform.localeName.split('_').first; // "ru_RU" → "ru"
+      await sysSync(lang: lang);
       
       // Запуск foreground service
       await BleBackgroundService.start(
@@ -1759,7 +1760,7 @@ class BleService extends ChangeNotifier {
       _startTimeUpdateTimer();
       _startPeriodicSyncTimer();
       
-      log('Sync OK: protocol=$_deviceProtocol, os=$_deviceOs', level: LogLevel.success);
+      log('Sync OK: protocol=$_deviceProtocol, os=$_deviceOs${lang != null ? ', lang=$lang' : ''}', level: LogLevel.success);
       log('  chip=$_deviceChip, uptime=${_deviceUptime}s', level: LogLevel.info);
       log('  battery=$_watchBattery%, time=$_watchTime', level: LogLevel.info);
       notifyListeners();
@@ -1791,7 +1792,8 @@ class BleService extends ChangeNotifier {
     _periodicSyncTimer?.cancel();
     _periodicSyncTimer = Timer.periodic(const Duration(hours: 1), (_) {
       if (isConnected) {
-        sysSync();
+        final lang = Platform.localeName.split('_').first;
+        sysSync(lang: lang);
       }
     });
   }
@@ -2072,7 +2074,7 @@ class BleService extends ChangeNotifier {
   /// 1. [id, "app", "push", [name, size, filename]]
   /// 2. ← [id, "ok", {"ready": true}]
   /// 3. → чанки через BIN_CHAR write
-  /// 4. → [0xFF, 0xFF] end marker
+  /// Device completes transfer by byte count (size sent in command).
   Future<bool> pushFile(String appName, String fileName, String content) async {
     if (_binChar == null) {
       log('BIN_CHAR не доступен', level: LogLevel.error);
@@ -2131,9 +2133,8 @@ class BleService extends ChangeNotifier {
         }
       }
 
-      // 4. End marker
-      final endMarker = Uint8List.fromList([0xFF, 0xFF]);
-      await _binChar!.write(endMarker.toList(), withoutResponse: true);
+      // Device completes the transfer by byte count (size sent in the command)
+      // and validates integrity itself, so no end marker is needed.
 
       log('Push OK: $chunkId chunks', level: LogLevel.success);
       return true;
